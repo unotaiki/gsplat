@@ -117,6 +117,12 @@ class Parser:
             self.points_rgb = np.empty((0, 3), dtype=np.uint8)
             self.point_indices = {name: np.empty((0,), dtype=np.int32)
                                   for name in self.image_names}
+            
+        # size of the scene measured by cameras
+        camera_locations = self.camtoworlds[:, :3, 3]
+        scene_center = np.mean(camera_locations, axis=0)
+        dists = np.linalg.norm(camera_locations - scene_center, axis=1)
+        self.scene_scale = np.max(dists)
         
         print(f"[Parser] Loaded {len(self.image_names)} images from {data_dir}.")
 
@@ -136,7 +142,10 @@ class Dataset:
       - patch_size: 画像からランダムクロップする場合のサイズ
       - load_depths: 3D 点群から Depth 情報を生成（points3d.ply が存在する場合）
     """
-    def __init__(self, parser: Parser, split: str = "train", patch_size: int = None, load_depths: bool = False):
+    def __init__(self, parser: Parser, 
+                 split: str = "train", 
+                 patch_size: int = None, 
+                 load_depths: bool = False):
         self.parser = parser
         self.split = split  # Blender では "train" のみ対応
         self.patch_size = patch_size

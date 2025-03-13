@@ -589,11 +589,11 @@ class Runner:
                 data = next(trainloader_iter)
 
             # トレーニングデータを展開する(カメラ内外部パラメーター、ピクセル値)
-            camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
+            camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4] # camtoworlds: この後、pose optimization や pose noise によって書き換える
             Ks = data["K"].to(device)  # [1, 3, 3]
             pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
             num_train_rays_per_step = (
-                pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
+                pixels.shape[0] * pixels.shape[1] * pixels.shape[2]   # viewer や TensorBoard ログで「処理レイ数/秒」を表示するため
             )
             image_ids = data["image_id"].to(device)
             masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
@@ -651,6 +651,7 @@ class Runner:
                 bkgd = torch.rand(1, 3, device=device)
                 colors = colors + bkgd * (1.0 - alphas)
 
+            # Densification Strategy（点の追加・削除） が、backward前に行う処理をここで実行
             self.cfg.strategy.step_pre_backward(
                 params=self.splats,
                 optimizers=self.optimizers,
@@ -659,57 +660,64 @@ class Runner:
                 info=info,
             )
 
-            # loss
+            # Loss の算出
             l1loss = F.l1_loss(colors, pixels)
             ssimloss = 1.0 - fused_ssim(
                 colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
             )
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
-            if cfg.depth_loss:
-                # query depths from depth map
-                points = torch.stack(
-                    [
-                        points[:, :, 0] / (width - 1) * 2 - 1,
-                        points[:, :, 1] / (height - 1) * 2 - 1,
-                    ],
-                    dim=-1,
-                )  # normalize to [-1, 1]
-                grid = points.unsqueeze(2)  # [1, M, 1, 2]
-                depths = F.grid_sample(
-                    depths.permute(0, 3, 1, 2), grid, align_corners=True
-                )  # [1, 1, M, 1]
-                depths = depths.squeeze(3).squeeze(1)  # [1, M]
-                # calculate loss in disparity space
-                disp = torch.where(depths > 0.0, 1.0 / depths, torch.zeros_like(depths))
-                disp_gt = 1.0 / depths_gt  # [1, M]
-                depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
-                loss += depthloss * cfg.depth_lambda
-            if cfg.use_bilateral_grid:
-                tvloss = 10 * total_variation_loss(self.bil_grids.grids)
-                loss += tvloss
+            
+            # # 震度に関する正則化
+            # if cfg.depth_loss:
+            #     # query depths from depth map
+            #     points = torch.stack(
+            #         [
+            #             points[:, :, 0] / (width - 1) * 2 - 1,
+            #             points[:, :, 1] / (height - 1) * 2 - 1,
+            #         ],
+            #         dim=-1,
+            #     )  # normalize to [-1, 1]
+            #     grid = points.unsqueeze(2)  # [1, M, 1, 2]
+            #     depths = F.grid_sample(
+            #         depths.permute(0, 3, 1, 2), grid, align_corners=True
+            #     )  # [1, 1, M, 1]
+            #     depths = depths.squeeze(3).squeeze(1)  # [1, M]
+            #     # calculate loss in disparity space
+            #     disp = torch.where(depths > 0.0, 1.0 / depths, torch.zeros_like(depths))
+            #     disp_gt = 1.0 / depths_gt  # [1, M]
+            #     depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
+            #     loss += depthloss * cfg.depth_lambda
+            
+            # # Bilateral Gridの正則化
+            # # バイラテラルグリッドが滑らかになるように TV正則化を加える
+            # # 荒れた色補正を防ぐ目的
+            # if cfg.use_bilateral_grid:
+            #     tvloss = 10 * total_variation_loss(self.bil_grids.grids)
+            #     loss += tvloss
 
             # regularizations
             if cfg.opacity_reg > 0.0:
                 loss = (
                     loss
                     + cfg.opacity_reg
-                    * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
+                    * torch.abs(torch.sigmoid(self.splats["opacities"])).mean() # opacity は 復元
                 )
             if cfg.scale_reg > 0.0:
                 loss = (
                     loss
-                    + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
+                    + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean() # scales は exp で復元
                 )
 
             loss.backward()
-
+            
+            # 学習進捗バーに、現在の損失やSH次数、深度誤差、カメラ姿勢誤差などを表示
             desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
-            if cfg.depth_loss:
-                desc += f"depth loss={depthloss.item():.6f}| "
-            if cfg.pose_opt and cfg.pose_noise:
-                # monitor the pose error if we inject noise
-                pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
-                desc += f"pose err={pose_err.item():.6f}| "
+            # if cfg.depth_loss:
+            #     desc += f"depth loss={depthloss.item():.6f}| "
+            # if cfg.pose_opt and cfg.pose_noise:
+            #     # monitor the pose error if we inject noise
+            #     pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
+            #     desc += f"pose err={pose_err.item():.6f}| "
             pbar.set_description(desc)
 
             # write images (gt and render)
@@ -728,10 +736,10 @@ class Runner:
                 self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
                 self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
                 self.writer.add_scalar("train/mem", mem, step)
-                if cfg.depth_loss:
-                    self.writer.add_scalar("train/depthloss", depthloss.item(), step)
-                if cfg.use_bilateral_grid:
-                    self.writer.add_scalar("train/tvloss", tvloss.item(), step)
+                # if cfg.depth_loss:
+                #     self.writer.add_scalar("train/depthloss", depthloss.item(), step)
+                # if cfg.use_bilateral_grid:
+                #     self.writer.add_scalar("train/tvloss", tvloss.item(), step)
                 if cfg.tb_save_image:
                     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
                     canvas = canvas.reshape(-1, *canvas.shape[2:])
@@ -753,16 +761,16 @@ class Runner:
                 ) as f:
                     json.dump(stats, f)
                 data = {"step": step, "splats": self.splats.state_dict()}
-                if cfg.pose_opt:
-                    if world_size > 1:
-                        data["pose_adjust"] = self.pose_adjust.module.state_dict()
-                    else:
-                        data["pose_adjust"] = self.pose_adjust.state_dict()
-                if cfg.app_opt:
-                    if world_size > 1:
-                        data["app_module"] = self.app_module.module.state_dict()
-                    else:
-                        data["app_module"] = self.app_module.state_dict()
+                # if cfg.pose_opt:
+                #     if world_size > 1:
+                #         data["pose_adjust"] = self.pose_adjust.module.state_dict()
+                #     else:
+                #         data["pose_adjust"] = self.pose_adjust.state_dict()
+                # if cfg.app_opt:
+                #     if world_size > 1:
+                #         data["app_module"] = self.app_module.module.state_dict()
+                #     else:
+                #         data["app_module"] = self.app_module.state_dict()
                 torch.save(
                     data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
                 )
@@ -786,6 +794,7 @@ class Runner:
                 save_ply(self.splats, f"{self.ply_dir}/point_cloud_{step}.ply", rgb)
 
             # Turn Gradients into Sparse Tensor before running optimizer
+            # メモリ節約のため、勾配をスパーステンソルに変換
             if cfg.sparse_grad:
                 assert cfg.packed, "Sparse gradients only work with packed mode."
                 gaussian_ids = info["gaussian_ids"]
@@ -800,6 +809,8 @@ class Runner:
                         is_coalesced=len(Ks) == 1,
                     )
 
+            # Visible Adam（選択的最適化）
+            # Taming-3DGSで使われる手法：可視な点（画面に映っている点）だけを更新
             if cfg.visible_adam:
                 gaussian_cnt = self.splats.means.shape[0]
                 if cfg.packed:
@@ -817,19 +828,20 @@ class Runner:
                 else:
                     optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.pose_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.app_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.bil_grid_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+            # for optimizer in self.pose_optimizers:
+            #     optimizer.step()
+            #     optimizer.zero_grad(set_to_none=True)
+            # for optimizer in self.app_optimizers:
+            #     optimizer.step()
+            #     optimizer.zero_grad(set_to_none=True)
+            # for optimizer in self.bil_grid_optimizers:
+            #     optimizer.step()
+            #     optimizer.zero_grad(set_to_none=True)
             for scheduler in schedulers:
                 scheduler.step()
 
             # Run post-backward steps after backward and optimizer
+            # step_post_backward は勾配反映・点の増加・削除・更新などを担う
             if isinstance(self.cfg.strategy, DefaultStrategy):
                 self.cfg.strategy.step_post_backward(
                     params=self.splats,
@@ -860,6 +872,7 @@ class Runner:
             if cfg.compression is not None and step in [i - 1 for i in cfg.eval_steps]:
                 self.run_compression(step=step)
 
+            # Viewer更新
             if not cfg.disable_viewer:
                 self.viewer.lock.release()
                 num_train_steps_per_sec = 1.0 / (time.time() - tic)
@@ -1061,3 +1074,87 @@ class Runner:
             radius_clip=3.0,  # skip GSs that have small image radius (in pixels)
         )  # [1, H, W, 3]
         return render_colors[0].cpu().numpy()
+    
+def main(local_rank: int, world_rank, world_size: int, cfg: Config):
+    if world_size > 1 and not cfg.disable_viewer:
+        cfg.disable_viewer = True
+        if world_rank == 0:
+            print("Viewer is disabled in distributed training.")
+
+    runner = Runner(local_rank, world_rank, world_size, cfg)
+
+    # 「学習済みモデルを使ってテストする」場合
+    if cfg.ckpt is not None:
+        # run eval only
+        ckpts = [
+            torch.load(file, map_location=runner.device, weights_only=True)
+            for file in cfg.ckpt
+        ]
+        for k in runner.splats.keys():
+            runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
+        step = ckpts[0]["step"]
+        runner.eval(step=step)
+        runner.render_traj(step=step)
+        if cfg.compression is not None:
+            runner.run_compression(step=step)
+    
+    # チェックポイントが指定されていない場合 → train() を実行し、最初から学習を開始
+    else:
+        runner.train()
+
+    if not cfg.disable_viewer:
+        print("Viewer running... Ctrl+C to exit.")
+        time.sleep(1000000)
+
+
+if __name__ == "__main__":
+    """
+    Usage:
+
+    ```bash
+    # Single GPU training
+    CUDA_VISIBLE_DEVICES=0 python simple_trainer.py default
+
+    # Distributed training on 4 GPUs: Effectively 4x batch size so run 4x less steps.
+    CUDA_VISIBLE_DEVICES=0,1,2,3 python simple_trainer.py default --steps_scaler 0.25
+
+    """
+
+    # Config objects we can choose between.
+    # Each is a tuple of (CLI description, config object).
+    configs = {
+        "default": (
+            "Gaussian splatting training using densification heuristics from the original paper.",
+            Config(
+                strategy=DefaultStrategy(verbose=True),
+            ),
+        ),
+        "mcmc": (
+            "Gaussian splatting training using densification from the paper '3D Gaussian Splatting as Markov Chain Monte Carlo'.",
+            Config(
+                init_opa=0.5,
+                init_scale=0.1,
+                opacity_reg=0.01,
+                scale_reg=0.01,
+                strategy=MCMCStrategy(verbose=True),
+            ),
+        ),
+    }
+    
+    # コマンドライン引数から設定を取得
+    cfg = tyro.extras.overridable_config_cli(configs)
+    cfg.adjust_steps(cfg.steps_scaler)
+
+    # try import extra dependencies
+    if cfg.compression == "png":
+        try:
+            import plas
+            import torchpq
+        except:
+            raise ImportError(
+                "To use PNG compression, you need to install "
+                "torchpq (instruction at https://github.com/DeMoriarty/TorchPQ?tab=readme-ov-file#install) "
+                "and plas (via 'pip install git+https://github.com/fraunhoferhhi/PLAS.git') "
+            )
+
+    cli(main, cfg, verbose=True)
