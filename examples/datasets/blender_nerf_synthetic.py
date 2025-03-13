@@ -60,7 +60,8 @@ class Parser:
         # --- 各フレームから画像ファイルパスとカメラ姿勢の取得 ---
         self.image_names = []  # JSON内の file_path（拡張子付与後）
         self.image_paths = []  # 絶対パス
-        camtoworld_list = []  # 各画像のカメラ-to-world行列
+        # world2cam_list = []     # ワールド座標系 → カメラ座標系への変換 (レンダリング・射影に使う)
+        cam2world_list = []  # カメラ座標系 → ワールド座標系への変換 (カメラ位置や向きを表す)
         self.camera_ids = []   # すべて 0 を格納
         
         for frame in frames:
@@ -74,10 +75,15 @@ class Parser:
             
             # transform_matrix を numpy array 化
             transform_matrix = np.array(frame.get("transform_matrix"), dtype=np.float32)
-            camtoworld_list.append(transform_matrix)
+            cam2world_list.append(transform_matrix)
+            # world2cam_list.append(transform_matrix)
             self.camera_ids.append(0)
         
-        self.camtoworlds = np.stack(camtoworld_list, axis=0)  # (N, 4, 4)
+        self.camtoworlds = np.array(cam2world_list,dtype=np.float32)
+        # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
+        self.camtoworlds[:, :3, 1:3] *= -1
+        # self.camtoworlds = np.stack(camtoworld_list, axis=0)  # (N, 4, 4)
+        world2cams = np.linalg.inv(self.camtoworlds)
         
         # --- 内部パラメータ K の計算 ---
         # 画像サイズは、最初の画像から取得
