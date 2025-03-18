@@ -1,6 +1,7 @@
 import os
 import json
 import numpy as np
+import torch
 from PIL import Image
 from pathlib import Path
 from typing import NamedTuple
@@ -150,3 +151,66 @@ def readNerfSyntheticCameras(path, white_background=True, extension=".png", eval
         test_cams = []
 
     return train_cams, test_cams
+
+
+# Gaussian Splatting 用のデータセットクラス
+class GaussianSplattingDataset:
+    """
+    NeRF Synthetic の transforms_json を用いてカメラ情報と画像を読み込み、
+    Gaussian Splatting 用のデータセットを作成するクラスです。
+    ※ depth 情報は読み込みません。
+    """
+    def __init__(self, root_dir, split="train", patch_size=None, white_background=True):
+        """
+        Args:
+            root_dir (str): transforms_*.json ファイルがあるディレクトリのパス
+            split (str): "train" または "test"
+            patch_size (int, optional): 画像のランダムクロップサイズ。None の場合はクロップしません。
+            white_background (bool): RGBA画像の場合、白背景に変換するかどうか
+        """
+        self.root_dir = root_dir
+        self.split = split
+        self.patch_size = patch_size
+
+        train_cams, test_cams = readNerfSyntheticCameras(root_dir, white_background=white_background)
+        self.cameras = train_cams if split == "train" else test_cams
+
+    def __len__(self):
+        return len(self.cameras)
+
+    def __getitem__(self, index):
+        cam = self.cameras[index]
+        # 画像は既に PIL.Image で読み込まれているので、NumPy配列に変換
+        image = np.array(cam.image)
+        
+        # カメラ内部パラメータ行列 (K) の計算
+        fx = 0.5 * cam.width / np.tan(0.5 * cam.FovX)
+        fy = 0.5 * cam.height / np.tan(0.5 * cam.FovY)
+        cx = cam.width / 2.0
+        cy = cam.height / 2.0
+        K = np.array([[fx, 0, cx],
+                      [0, fy, cy],
+                      [0,  0,  1]], dtype=np.float32)
+        
+        # カメラ→ワールド変換行列の作成（4×4）
+        camtoworld = np.eye(4, dtype=np.float32)
+        camtoworld[:3, :3] = cam.R
+        camtoworld[:3, 3] = cam.T
+
+        # patch_size が指定されている場合はランダムクロップを行う
+        if self.patch_size is not None:
+            h, w = image.shape[0], image.shape[1]
+            x = np.random.randint(0, max(w - self.patch_size, 1))
+            y = np.random.randint(0, max(h - self.patch_size, 1))
+            image = image[y:y+self.patch_size, x:x+self.patch_size]
+            # 内部パラメータの主点も調整
+            K[0, 2] -= x
+            K[1, 2] -= y
+
+        data = {
+            "image": torch.from_numpy(image).float(),       # 画像データ
+            "K": torch.from_numpy(K).float(),               # カメラ内部パラメータ行列
+            "camtoworld": torch.from_numpy(camtoworld).float(),  # カメラ→ワールド変換行列
+            "image_id": index,
+        }
+        return data
