@@ -14,7 +14,10 @@ def save_ply(splats: torch.nn.ParameterDict, dir: str, colors: torch.Tensor = No
 
     means = numpy_data["means"]
     scales = numpy_data["scales"]
+    
+    
     quats = numpy_data["quats"]
+    
     opacities = numpy_data["opacities"]
 
     sh0 = numpy_data["sh0"].transpose(0, 2, 1).reshape(means.shape[0], -1)
