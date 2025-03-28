@@ -65,14 +65,16 @@ class Config:
     render_traj_path: str = "interp"
 
     # Path to the Mip-NeRF 360 dataset
-    data_dir: str = "../../blender_dataset/20250327-1656_simple-river-cos_refraction_env10_angle-40"
-    DATA_NAME = os.path.basename(data_dir)
-    data_dir = os.path.abspath(data_dir)    
+    # data_dir: str = "../../blender_dataset/20250327-1656_simple-river-cos_refraction_env10_angle-40"
+    refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "OneDrive", "3d_map_data", "20250327_simple-river", \
+        "20250327-1656_simple-river-cos_refraction_env10_angle-40"))
+    non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "OneDrive", "3d_map_data", "20250327_simple-river", \
+        "20250327-1750_simple-river-cos_wo-refraction_env3_angle-40"))
     # Downsample factor for the dataset
     data_factor: int = 4
     # Directory to save results
     datetime = time.strftime("%Y%m%d-%H%M%S")
-    result_dir: str = f"results/{DATA_NAME}_{datetime}" 
+    result_dir: str = f"results/{datetime}_{os.path.basename(refraction_dir)}" 
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -95,15 +97,15 @@ class Config:
     # Number of training steps   
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, Config.max_steps])
+    eval_steps: List[int] = field(default_factory=lambda: [1_000, 7_000, 15_000, Config.max_steps])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [7_000, Config.max_steps])
+    save_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, Config.max_steps])
     # Whether to save ply file (storage size can be large)
     save_ply: bool = True
     # Steps to save the model as ply
     ply_steps: List[int] = field(default_factory=lambda: [7_000, Config.max_steps])
 
-    # Initialization strategy   # "sfm" または "random", "river"のいずれか [TODO] おおよその河床の位置に点群を配置
+    # Initialization strategy   # "sfm" または "random", "river"のいずれか
     init_type: str = "river"
     # Initial number of GSs. Ignored if using sfm
     init_num_pts: int = 100_000
@@ -185,6 +187,7 @@ class Config:
     ### ========= ADDED ============ ###
     
     # Refraction
+    flag_refraction: bool = False
     n: float = 1.33 # refractive index
     plane: float = 0.0 # refractive plane (to z axis)
     atol: float = 1e-8 # tolerance for refraction calculation
@@ -344,8 +347,10 @@ class Runner:
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
 
         # Load data: Training data should contain initial points and colors.
+        
+        # Training Data Set, Refracted Images
         self.parser = Parser(
-            data_dir=cfg.data_dir,
+            data_dir=cfg.refraction_dir if cfg.flag_refraction else cfg.non_refraction_dir,
         )
         self.trainset = Dataset(
             self.parser,
@@ -353,7 +358,11 @@ class Runner:
             patch_size=cfg.patch_size,
             load_depths=cfg.depth_loss,
         )
-        self.valset = Dataset(self.parser, split="val")  # TODO : Do i need validation set?
+        # Validation Data Set, Non-refracted Images
+        self.parser_val = Parser(
+            data_dir=cfg.non_refraction_dir if cfg.flag_refraction else cfg.refraction_dir,
+        )
+        self.valset = Dataset(self.parser_val, split="train")  # TODO : Do i need validation set?
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
 
@@ -625,18 +634,32 @@ class Runner:
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
 
             # forward (レンダリング)
-            renders, alphas, info = self.rasterize_splats_with_refraction(
-                camtoworlds=camtoworlds,
-                Ks=Ks,
-                width=width,
-                height=height,
-                sh_degree=sh_degree_to_use,
-                near_plane=cfg.near_plane,
-                far_plane=cfg.far_plane,
-                image_ids=image_ids,
-                render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-                masks=masks,
-            )
+            if cfg.flag_refraction:
+                renders, alphas, info = self.rasterize_splats_with_refraction(
+                    camtoworlds=camtoworlds,
+                    Ks=Ks,
+                    width=width,
+                    height=height,
+                    sh_degree=sh_degree_to_use,
+                    near_plane=cfg.near_plane,
+                    far_plane=cfg.far_plane,
+                    image_ids=image_ids,
+                    render_mode="RGB+ED" if cfg.depth_loss else "RGB",
+                    masks=masks,
+                )
+            else:
+                renders, alphas, info = self.rasterize_splats(
+                    camtoworlds=camtoworlds,
+                    Ks=Ks,
+                    width=width,
+                    height=height,
+                    sh_degree=sh_degree_to_use,
+                    near_plane=cfg.near_plane,
+                    far_plane=cfg.far_plane,
+                    image_ids=image_ids,
+                    render_mode="RGB+ED" if cfg.depth_loss else "RGB",
+                    masks=masks,
+                )                
             # 深度がある場合は4ch(RGB+Depth)になるため、RGBとDで分離
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
@@ -835,9 +858,16 @@ class Runner:
         world_rank = self.world_rank
         world_size = self.world_size
 
-        valloader = torch.utils.data.DataLoader(
-            self.valset, batch_size=1, shuffle=False, num_workers=1
-        )
+        # Load non-refracted images when traning refracted images
+        if cfg.flag_refraction:
+            valloader = torch.utils.data.DataLoader(
+                self.valset, batch_size=1, shuffle=False, num_workers=1
+            )
+        # Load refracted images when training non-refracted images
+        else:
+            valloader = torch.utils.data.DataLoader(
+                self.trainset, batch_size=1, shuffle=False, num_workers=1
+            )
         ellipse_time = 0
         metrics = defaultdict(list)
         for i, data in enumerate(valloader):
@@ -849,16 +879,32 @@ class Runner:
 
             torch.cuda.synchronize()
             tic = time.time()
-            colors, _, _ = self.rasterize_splats(
-                camtoworlds=camtoworlds,
-                Ks=Ks,
-                width=width,
-                height=height,
-                sh_degree=cfg.sh_degree,
-                near_plane=cfg.near_plane,
-                far_plane=cfg.far_plane,
-                masks=masks,
-            )  # [1, H, W, 3]
+            # If refracted images are trained, render trained scene without refraction, 
+            # and compare with non-refraction images
+            if cfg.flag_refraction:
+                colors, _, _ = self.rasterize_splats(
+                    camtoworlds=camtoworlds,
+                    Ks=Ks,
+                    width=width,
+                    height=height,
+                    sh_degree=cfg.sh_degree,
+                    near_plane=cfg.near_plane,
+                    far_plane=cfg.far_plane,
+                    masks=masks,
+                )  # [1, H, W, 3] 
+            # if non-refraction images are trained, render trained scene with refraction,
+            # and compare with refracted images
+            else:           
+                colors, _, _ = self.rasterize_splats_with_refraction(
+                    camtoworlds=camtoworlds,
+                    Ks=Ks,
+                    width=width,
+                    height=height,
+                    sh_degree=cfg.sh_degree,
+                    near_plane=cfg.near_plane,
+                    far_plane=cfg.far_plane,
+                    masks=masks,
+                )  # [1, H, W, 3]         
             torch.cuda.synchronize()
             ellipse_time += time.time() - tic
 
