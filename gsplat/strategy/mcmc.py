@@ -53,6 +53,7 @@ class MCMCStrategy(Strategy):
     refine_every: int = 100
     min_opacity: float = 0.005
     verbose: bool = False
+    ratio_increase_new_gs: float = 1.05
 
     def initialize_state(self) -> Dict[str, Any]:
         """Initialize and return the running state for this strategy."""
@@ -173,7 +174,7 @@ class MCMCStrategy(Strategy):
         binoms: Tensor,
     ) -> int:
         current_n_points = len(params["means"])
-        n_target = min(self.cap_max, int(1.05 * current_n_points))
+        n_target = min(self.cap_max, int(self.ratio_increase_new_gs * current_n_points))
         n_gs = max(0, n_target - current_n_points)
         if n_gs > 0:
             sample_add(

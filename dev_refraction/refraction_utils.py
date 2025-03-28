@@ -8,6 +8,7 @@ def transform_gaussian_point(point, cam_center, n=1.33, plane=0, atol=1e-8):
     n: 屈折率（例: 水の場合 1.33）
     """
     # カメラ中心とのオフセット
+    cam_center = np.squeeze(cam_center)
     x0, y0, _ = cam_center
     H = cam_center[2]
     dx = point[0] - x0
@@ -68,6 +69,11 @@ def transform_all_gaussians(means_np, cam_center, n=1.33, plane=0, atol=1e-8):
     for i in range(means_np.shape[0]):
         new_point = transform_gaussian_point(means_np[i], cam_center, n, plane, atol)
         new_means.append(new_point)
+        
+    if len(new_means) == 0:
+    # Return an empty array with shape (0, number of dimensions), here assuming 3.
+        return np.empty((0, means_np.shape[1]))
+    
     return np.stack(new_means, axis=0)
 
 
@@ -102,4 +108,4 @@ def culling_points(points, W2C, K, width, height):
     
     mask = valid_depth & valid_u & valid_v
     
-    return mask
+    return mask.squeeze()

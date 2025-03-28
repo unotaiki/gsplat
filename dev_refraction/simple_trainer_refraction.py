@@ -65,13 +65,14 @@ class Config:
     render_traj_path: str = "interp"
 
     # Path to the Mip-NeRF 360 dataset
-    data_dir: str = "~/blender_dataset/20250327-1656_simple-river-cos_refraction_env10_angle-40"
+    data_dir: str = "../../blender_dataset/20250327-1656_simple-river-cos_refraction_env10_angle-40"
+    DATA_NAME = os.path.basename(data_dir)
     data_dir = os.path.abspath(data_dir)    
     # Downsample factor for the dataset
     data_factor: int = 4
     # Directory to save results
     datetime = time.strftime("%Y%m%d-%H%M%S")
-    result_dir: str = f"results/transformers_{datetime}" 
+    result_dir: str = f"results/{DATA_NAME}_{datetime}" 
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -94,13 +95,13 @@ class Config:
     # Number of training steps   
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, Config.max_steps])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
+    save_steps: List[int] = field(default_factory=lambda: [7_000, Config.max_steps])
     # Whether to save ply file (storage size can be large)
     save_ply: bool = True
     # Steps to save the model as ply
-    ply_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
+    ply_steps: List[int] = field(default_factory=lambda: [7_000, Config.max_steps])
 
     # Initialization strategy   # "sfm" または "random", "river"のいずれか [TODO] おおよその河床の位置に点群を配置
     init_type: str = "river"
@@ -140,10 +141,10 @@ class Config:
     # Use random background for training to discourage transparency
     random_bkgd: bool = True
 
-    # Opacity regularization (default:0.0, mcmc:0.05)
-    opacity_reg: float = 0.05
-    # Scale regularization (default:0.0, mcmc:0.05)
-    scale_reg: float = 0.05
+    # Opacity regularization (default:0.0, mcmc:0.01)
+    opacity_reg: float = 0.01
+    # Scale regularization (default:0.0, mcmc:0.01)
+    scale_reg: float = 0.01
 
     # Enable camera optimization.
     pose_opt: bool = False
@@ -180,10 +181,18 @@ class Config:
 
     lpips_net: Literal["vgg", "alex"] = "alex"
     
+    
+    ### ========= ADDED ============ ###
+    
     # Refraction
     n: float = 1.33 # refractive index
     plane: float = 0.0 # refractive plane (to z axis)
     atol: float = 1e-8 # tolerance for refraction calculation
+    init_depth: float = -20.0
+    
+    # Strategy
+    # MCMC
+    mcmc_ratio_increase_new_gs: float = 1.05
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -202,6 +211,7 @@ class Config:
             strategy.refine_start_iter = int(strategy.refine_start_iter * factor)
             strategy.refine_stop_iter = int(strategy.refine_stop_iter * factor)
             strategy.refine_every = int(strategy.refine_every * factor)
+            strategy.ratio_increase_new_gs = cfg.mcmc_ratio_increase_new_gs
         else:
             assert_never(strategy)
             
@@ -232,10 +242,10 @@ def create_splats_with_optimizers(
         rgbs = torch.rand((init_num_pts, 3))
     elif init_type == "river":
         # make grid by numpy
-        x = np.linspace(-20, 20, 1000)
-        y = np.linspace(-20, 20, 1000)
+        x = np.linspace(-40, 40, 10)
+        y = np.linspace(-40, 40, 10)
         xx, yy = np.meshgrid(x, y)
-        points = np.stack([xx, yy, np.zeros_like(xx)], axis=-1).reshape(-1, 3)
+        points = np.stack([xx, yy, np.ones_like(xx)*cfg.init_depth], axis=-1).reshape(-1, 3)
         points = torch.from_numpy(points).float()
         # randon color
         rgbs = torch.rand((points.shape[0], 3))
@@ -475,10 +485,10 @@ class Runner:
     ) -> Tuple[Tensor, Tensor, Dict]:
         
         # copy tensors to numpy
-        means_np = self.splats["means"].cpu().clone().numpy() # [N, 3]
-        camtoworlds_np = camtoworlds.cpu().clone().numpy() # [1, 4, 4]
+        means_np = self.splats["means"].cpu().detach().clone().numpy() # [N, 3]
+        camtoworlds_np = camtoworlds.cpu().detach().clone().numpy() # [1, 4, 4]
         cam_center_np = camtoworlds_np[:, :3, 3] # [1, 3]
-        Ks_np = Ks.cpu().clone().numpy() # [1, 3, 3]
+        Ks_np = Ks.cpu().detach().clone().numpy() # [1, 3, 3]
         
         # culling the gaussians that are not in the veiw frustum
         mask = culling_points(means_np, camtoworlds_np, Ks_np, width, height)
