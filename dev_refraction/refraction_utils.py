@@ -40,13 +40,13 @@ def transform_gaussian_point(point, cam_center, n=1.33, plane=0, atol=1e-8):
             break
 
     # 入射角 theta0, 屈折角 theta1 の計算
-    theta0 = np.arcsin(rs / np.hypot(H, rs))
-    theta1 = np.arcsin((r - rs) / np.hypot(-h, r - rs))
+    theta0 = np.arctan(rs/H)
+    theta1 = np.arctan((rs-r)/h)
     
     # 補正量の算出
     dr = h * (n2 - 1) * (np.tan(theta1)**3)  # r の補正
     ra = r - dr
-    A = (1 - n2 * (np.sin(theta1)**2))**1.5
+    A = np.sqrt(1 - n2 * (np.sin(theta1)**2))**3
     za = h * A / (n * (np.cos(theta1)**3))
     
     # 水平方向の補正 (カメラ中心からのずれ)
