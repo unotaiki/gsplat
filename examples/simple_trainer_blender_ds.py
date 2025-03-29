@@ -59,7 +59,7 @@ class Config:
     # Name of compression strategy to use    # 出力点群をPNG圧縮するかどうか。
     compression: Optional[Literal["png"]] = None
     # Render trajectory path                 # interp, ellipse, spiral のいずれか
-    render_traj_path: str = "interp"
+    render_traj_path: str = "ellipse"
 
     # Path to the Mip-NeRF 360 dataset
     data_dir: str = "../data/transformers"
@@ -91,13 +91,13 @@ class Config:
     # Number of training steps   
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [1_000, 7_000, 15_000, 22_000, 30_000])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
+    save_steps: List[int] = field(default_factory=lambda: [30_000])
     # Whether to save ply file (storage size can be large)
     save_ply: bool = True
     # Steps to save the model as ply
-    ply_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
+    ply_steps: List[int] = field(default_factory=lambda: [15_000, 30_000])
 
     # Initialization strategy   # "sfm" または "random" のいずれか
     init_type: str = "sfm"
@@ -106,7 +106,7 @@ class Config:
     # Initial extent of GSs as a multiple of the camera extent. Ignored if using sfm
     init_extent: float = 3.0
     # Degree of spherical harmonics
-    sh_degree: int = 3
+    sh_degree: int = 0
     # Turn on another SH degree every this steps
     sh_degree_interval: int = 1000
     # Initial opacity of GS
@@ -119,7 +119,7 @@ class Config:
     # Near plane clipping distance
     near_plane: float = 0.01
     # Far plane clipping distance
-    far_plane: float = 1e10
+    far_plane: float = 1e3
 
     # Strategy for GS densification
     strategy: Union[DefaultStrategy, MCMCStrategy] = field(
@@ -135,7 +135,7 @@ class Config:
     antialiased: bool = False
 
     # Use random background for training to discourage transparency
-    random_bkgd: bool = False
+    random_bkgd: bool = True
 
     # Opacity regularization
     opacity_reg: float = 0.0

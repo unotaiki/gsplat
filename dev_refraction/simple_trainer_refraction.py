@@ -62,7 +62,7 @@ class Config:
     # Name of compression strategy to use    # 出力点群をPNG圧縮するかどうか。
     compression: Optional[Literal["png"]] = None
     # Render trajectory path                 # interp, ellipse, spiral のいずれか
-    render_traj_path: str = "interp"
+    render_traj_path: str = "ellipse"
 
     # Path to the Mip-NeRF 360 dataset
     # data_dir: str = "../../blender_dataset/20250327-1656_simple-river-cos_refraction_env10_angle-40"
@@ -126,7 +126,7 @@ class Config:
     # Near plane clipping distance
     near_plane: float = 0.01
     # Far plane clipping distance
-    far_plane: float = 1e10
+    far_plane: float = 1e4
 
     # Strategy for GS densification
     strategy: Union[DefaultStrategy, MCMCStrategy] = field(
