@@ -46,8 +46,14 @@ from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat.optimizers import SelectiveAdam
 from gsplat.utils import save_ply
 
+
+
+
+
+
 # function to transform Gaussians location for Refraction Rasterization
-from refraction_utils import transform_all_gaussians, culling_points, transform_gaussian_point
+from refraction_utils_torch import culling_points_torch
+from refraction_utils_torch import transform_with_ste_custom, transform_with_detach_identity
 
 ### ======== Config クラス – 設定オブジェクト ======== ###
 # Gaussian Splattingのトレーニングや評価に使うパラメータ群をまとめている設定用のデータクラス
@@ -188,12 +194,19 @@ class Config:
     
     ### ========= ADDED ============ ###
     
+    # initialize river
+    num_init_points: int = 1e5
+    
     # Refraction
     flag_refraction: bool = True
     n: float = 1.33 # refractive index
     plane: float = 0.0 # refractive plane (to z axis)
     atol: float = 1e-8 # tolerance for refraction calculation
     init_depth: float = -20.0
+    use_custom_ste: bool = True
+    
+    num_iter_newtom: int = 8 # ニュートン法の反復回数を制御
+    tol_newton: float = 1e-2  # ニュートン法の精度
     
     # Strategy
     # MCMC
@@ -247,8 +260,9 @@ def create_splats_with_optimizers(
         rgbs = torch.rand((init_num_pts, 3))
     elif init_type == "river":
         # make grid by numpy
-        x = np.linspace(-40, 40, 10)
-        y = np.linspace(-40, 40, 10)
+        num_row = int(np.sqrt(Config.num_init_points))
+        x = np.linspace(-40, 40, num_row)
+        y = np.linspace(-40, 40, num_row)
         xx, yy = np.meshgrid(x, y)
         points = np.stack([xx, yy, np.ones_like(xx)*cfg.init_depth], axis=-1).reshape(-1, 3)
         points = torch.from_numpy(points).float()
@@ -493,37 +507,41 @@ class Runner:
         Ks: Tensor,
         width: int,
         height: int,
+        use_custom_ste: bool = True,
+        n: float = 1.33, 
+        plane: float = 0, 
+        num_iters_newton: int = 10,   # ニュートン法の反復回数を制御
+        tol_newton: float = 1e-6,     # ニュートン法の精度
         masks: Optional[Tensor] = None,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         
         # copy tensors to numpy
-        means_np = self.splats["means"].cpu().detach().clone().numpy() # [N, 3]
-        camtoworlds_np = camtoworlds.cpu().detach().clone().numpy() # [1, 4, 4]
-        cam_center_np = camtoworlds_np[:, :3, 3] # [1, 3]
-        Ks_np = Ks.cpu().detach().clone().numpy() # [1, 3, 3]
+        means = self.splats["means"] # [N, 3]
+        cam_center = camtoworlds[0, :3, 3] # [1, 3]
         
-        # culling the gaussians that are not in the veiw frustum
-        mask = culling_points(means_np, camtoworlds_np, Ks_np, width, height)
-        means_culled_np = means_np[mask]
-        mask_tensor = torch.from_numpy(mask).to(self.device)
-        
-        # transform gaussians by refraction
-        transformed_means_np = transform_all_gaussians(means_culled_np, cam_center_np, n=cfg.n, plane=cfg.plane, atol=cfg.atol)
-        
-        # copy back to tensor
-        transformed_means = torch.from_numpy(transformed_means_np).to(self.device).float()
-        transformed_means_full = torch.from_numpy(means_np).to(self.device).float()
-        transformed_means_full[mask_tensor] = transformed_means
-        transformed_means = transformed_means_full
-        
-        # rasterization does normalization internally
-        quats = self.splats["quats"]  # [N, 4]
-        scales = torch.exp(self.splats["scales"])  # [N, 3]
-        opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
+        # Culling : Remove gaussians out of veiw frustum
+        mask = culling_points_torch(means, camtoworlds, Ks, width, height)
+        if mask.sum() > 0:
+            culled_means = means[mask]
+            # Refractive Transform
+            if use_custom_ste:
+                transformes_culled_means = transform_with_ste_custom(culled_means, cam_center, n, plane, num_iters_newton, tol_newton)
+            else:
+                transformed_culled = transform_with_detach_identity(culled_means, cam_center, n, plane, num_iters_newton, tol_newton)
+            transformed_means = means.clone()
+            transformed_means[mask] = transformes_culled_means
+        else:
+            transformed_means = means
+            
+        # 補正後の Gaussian 中心で更新
+        self.splats["means"] = transformed_means
 
-        image_ids = kwargs.pop("image_ids", None)
-        colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
+        # 以下、ラスタライズ処理の例（既存のCUDA関数などを呼び出す）
+        quats = self.splats["quats"]                       # [N, 4]
+        scales = torch.exp(self.splats["scales"])          # [N, 3]
+        opacities = torch.sigmoid(self.splats["opacities"])  # [N]
+        colors = torch.cat([self.splats["sh0"], self.splats["shN"]], dim=1)  # [N, K, 3]
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         render_colors, render_alphas, info = rasterization(
@@ -644,26 +662,30 @@ class Runner:
                     Ks=Ks,
                     width=width,
                     height=height,
+                    use_custom_ste=cfg.use_custom_ste,
+                    n=cfg.n,
+                    plane=cfg.plane,
+                    num_iters_newton=cfg.num_iter_newtom,   # [TODO] i dont know what to do
+                    tol_newton=cfg.tol_newton,
                     sh_degree=sh_degree_to_use,
                     near_plane=cfg.near_plane,
                     far_plane=cfg.far_plane,
-                    image_ids=image_ids,
                     render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                     masks=masks,
                 )
-            else:
-                renders, alphas, info = self.rasterize_splats(
-                    camtoworlds=camtoworlds,
-                    Ks=Ks,
-                    width=width,
-                    height=height,
-                    sh_degree=sh_degree_to_use,
-                    near_plane=cfg.near_plane,
-                    far_plane=cfg.far_plane,
-                    image_ids=image_ids,
-                    render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-                    masks=masks,
-                )                
+            # else:
+            #     renders, alphas, info = self.rasterize_splats(
+            #         camtoworlds=camtoworlds,
+            #         Ks=Ks,
+            #         width=width,
+            #         height=height,
+            #         sh_degree=sh_degree_to_use,
+            #         near_plane=cfg.near_plane,
+            #         far_plane=cfg.far_plane,
+            #         image_ids=image_ids,
+            #         render_mode="RGB+ED" if cfg.depth_loss else "RGB",
+            #         masks=masks,
+            #     )                
             # 深度がある場合は4ch(RGB+Depth)になるため、RGBとDで分離
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
@@ -1121,7 +1143,8 @@ if __name__ == "__main__":
                 init_scale=0.1,
                 opacity_reg=0.01,
                 scale_reg=0.01,
-                strategy=MCMCStrategy(verbose=True),
+                strategy=MCMCStrategy(verbose=True,
+                                      ratio_increase_new_gs=Config.mcmc_ratio_increase_new_gs),
             ),
         ),
     }
