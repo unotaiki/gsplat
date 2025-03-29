@@ -97,7 +97,8 @@ class Config:
     # Number of training steps   
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [1_000, 7_000, 15_000, Config.max_steps])
+    # eval_steps: List[int] = field(default_factory=lambda: [1_000, 7_000, 15_000, Config.max_steps])
+    eval_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, Config.max_steps])
     # Whether to save ply file (storage size can be large)
@@ -338,8 +339,10 @@ class Runner:
         os.makedirs(self.ckpt_dir, exist_ok=True)
         self.stats_dir = f"{cfg.result_dir}/stats"
         os.makedirs(self.stats_dir, exist_ok=True)
-        self.render_dir = f"{cfg.result_dir}/renders"
-        os.makedirs(self.render_dir, exist_ok=True)
+        self.render_refraction_dir = f"{cfg.result_dir}/renders/refraction"
+        os.makedirs(self.render_refraction_dir, exist_ok=True)
+        self.render_non_refraction_dir = f"{cfg.result_dir}/renders/non_refraction"
+        os.makedirs(self.render_non_refraction_dir, exist_ok=True)
         self.ply_dir = f"{cfg.result_dir}/ply"
         os.makedirs(self.ply_dir, exist_ok=True)
 
@@ -857,17 +860,9 @@ class Runner:
         device = self.device
         world_rank = self.world_rank
         world_size = self.world_size
-
-        # Load non-refracted images when traning refracted images
-        if cfg.flag_refraction:
-            valloader = torch.utils.data.DataLoader(
-                self.valset, batch_size=1, shuffle=False, num_workers=1
-            )
-        # Load refracted images when training non-refracted images
-        else:
-            valloader = torch.utils.data.DataLoader(
-                self.trainset, batch_size=1, shuffle=False, num_workers=1
-            )
+        valloader = torch.utils.data.DataLoader(
+            self.valset, batch_size=1, shuffle=False, num_workers=1
+        )
         ellipse_time = 0
         metrics = defaultdict(list)
         for i, data in enumerate(valloader):
@@ -916,7 +911,7 @@ class Runner:
                 canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
                 canvas = (canvas * 255).astype(np.uint8)
                 imageio.imwrite(
-                    f"{self.render_dir}/{stage}_step{step}_{i:04d}.png",
+                    f"{self.render_refraction_dir}/{stage}_step{step}_{i:04d}.png",
                     canvas,
                 )
 
