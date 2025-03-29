@@ -44,7 +44,7 @@ def transform_gaussian_point(point, cam_center, n=1.33, plane=0, atol=1e-8):
     theta1 = np.arctan((rs-r)/h)
     
     # 補正量の算出
-    dr = h * (n2 - 1) * (np.tan(theta1)**3)  # r の補正
+    dr = - h * (n2 - 1) * (np.tan(theta1)**3)  # r の補正
     ra = r - dr
     A = np.sqrt(1 - n2 * (np.sin(theta1)**2))**3
     za = h * A / (n * (np.cos(theta1)**3))
