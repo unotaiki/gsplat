@@ -104,7 +104,7 @@ class Config:
     # Number of training steps   
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [1_000, 7_000, 15_000, 22_000, Config.max_steps])
+    eval_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, 22_000, Config.max_steps])
     # eval_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, Config.max_steps])
@@ -209,6 +209,8 @@ class Config:
     tol_newton: float = 1e-2  # ニュートン法の精度
     
     # Strategy
+    # ADC
+    prune_opa: float = 0.1
     # MCMC
     mcmc_ratio_increase_new_gs: float = 1.05
 
@@ -1133,7 +1135,8 @@ if __name__ == "__main__":
         "default": (
             "Gaussian splatting training using densification heuristics from the original paper.",
             Config(
-                strategy=DefaultStrategy(verbose=True),
+                strategy=DefaultStrategy(verbose=True,
+                                         prune_opa=Config.prune_opa),
             ),
         ),
         "mcmc": (
