@@ -40,7 +40,7 @@ def newton_solve_quartic_torch(r: torch.Tensor, h: torch.Tensor, H: float, n: fl
         s = s_new
     return s
 
-def transform_gaussians_torch(means: torch.Tensor, cam_center: torch.Tensor, n: float = 1.33, plane: float = 0, num_iters: int = 10, tol: float = 1e-6) -> torch.Tensor:
+def transform_gaussians_torch(means: torch.Tensor, quats: torch.Tensor, cam_center: torch.Tensor, n: float = 1.33, plane: float = 0, num_iters: int = 10, tol: float = 1e-6) -> torch.Tensor:
     """
     GPU上の torch.Tensor (shape: [N, 3]) に対して、
     カメラ中心 cam_center ([3]) および水面 z = plane を基準に屈折補正を適用する関数。
@@ -58,7 +58,6 @@ def transform_gaussians_torch(means: torch.Tensor, cam_center: torch.Tensor, n: 
     # 物理的制約として s < r となるように clamping（必要に応じて調整）
     s = torch.where(s < r, s, r * 0.99)
 
-    
     # 入射角・屈折角の計算
     theta0 = torch.atan(s / H)
     h_safe = torch.where(torch.abs(h) < tol, torch.full_like(h, tol), h)
@@ -66,18 +65,44 @@ def transform_gaussians_torch(means: torch.Tensor, cam_center: torch.Tensor, n: 
     
     # 補正量の計算
     dr = - h * (n**2 - 1) * (torch.tan(theta1)**3)  # (> 0)
-    ra = r - dr
+    r_app = r - dr
     A = (1 - n**2 * (torch.sin(theta1)**2)).clamp(min=1e-8) ** 1.5
-    za = h * A / (n * (torch.cos(theta1)**3))
+    z_app = h * A / (n * (torch.cos(theta1)**3))
     
-    dx_app = ra * torch.cos(angle)
-    dy_app = ra * torch.sin(angle)
+    dx_app = r_app * torch.cos(angle)
+    dy_app = r_app * torch.sin(angle)
     
+    # 見かけの位置に座標変換
     new_x = x0 + dx_app
     new_y = y0 + dy_app
-    new_z = plane + za
+    new_z = plane + z_app
+    new_means = torch.stack([new_x, new_y, new_z], dim=1)  # [N, 3]
     
-    return torch.stack([new_x, new_y, new_z], dim=1)  # [N, 3]
+    
+    # ======= Rotation =========
+    # set the rotation axis
+    dir = torch.stack([dx_app, dy_app, z_app-H],dim=1 )  # [N, 3]
+    z_axis = torch.tensor([0, 0, 1], device=means.device, dtype=means.dtype).expand_as(dir)  # [N, 3]
+    
+    # rotation axis is the cross product of dir and z_axis
+    rot_axis = torch.cross(dir, z_axis, dim=1)  # [N, 3]
+    rot_axis = torch.nn.functional.normalize(rot_axis, dim=1)  # [N, 3]
+    
+    # rotation angle
+    d_theta = theta0 - theta1
+    
+    # rotation quaternion
+    half_d_theta = d_theta / 2
+    sin_half_d_theta = torch.sin(half_d_theta)
+    d_qw = torch.cos(half_d_theta).unsqueeze(1)     # [N, 1]
+    d_q = rot_axis * sin_half_d_theta.unsqueeze(1)  # [N, 3]
+    d_quat = torch.cat([d_qw, d_q], dim=1)          # [N, 4]
+    
+    # rotate the quaternion
+    new_quats = d_quat @ quats  # [N, 4]
+    new_quats = torch.nn.functional.normalize(new_quats, dim=1)  # [N, 4] 
+    
+    return new_means, new_quats
 
 def culling_points_torch(points: torch.Tensor, W2C: torch.Tensor, K: torch.Tensor, width: int, height: int, mergin_factor: float=0.4) -> torch.Tensor:
     """
@@ -113,16 +138,16 @@ def culling_points_torch(points: torch.Tensor, W2C: torch.Tensor, K: torch.Tenso
 # アプローチ 1: カスタムAutograd Function を用いる方法
 class RefractionSTE(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, means, cam_center, n, plane, num_iters, tol):
+    def forward(ctx, means, quats, cam_center, n, plane, num_iters, tol):
         # forward: transform means by refraction model
-        transformed = transform_gaussians_torch(means, cam_center, n, plane, num_iters, tol)
-        ctx.save_for_backward(means)  # 元の means を保存
-        return transformed
+        transformed_means, transformed_quats = transform_gaussians_torch(means, quats, cam_center, n, plane, num_iters, tol)
+        ctx.save_for_backward(means, quats)  # 元の means を保存
+        return transformed_means, transformed_quats
 
     @staticmethod
     def backward(ctx, grad_output):
         # backward: 勾配を元の means に流す
-        menas, = ctx.saved_tensors
-        return grad_output.clone(), None, None, None, None, None
+        menas, quatas, = ctx.saved_tensors
+        return grad_output.clone(), grad_output.clone(), None, None, None, None, None
 
 

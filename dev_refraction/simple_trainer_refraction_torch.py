@@ -535,8 +535,9 @@ class Runner:
         mask = mask_culling & mask_below_surface
         
         # Apply transformation
-        transformed = RefractionSTE.apply(
+        transformed_means, transformed_quats = RefractionSTE.apply(
             self.splats["means"][mask],
+            self.splats["quats"][mask],
             cam_center,
             n,
             plane,
@@ -545,20 +546,22 @@ class Runner:
         )
         
         # Recreate the splats with transformed means
-        transformed_means = self.splats["means"].detach().clone()
-        transformed_means[mask] = transformed
+        refractive_means = self.splats["means"].detach().clone()
+        refractive_means[mask] = transformed_means
+        
+        refractive_quats = self.splats["quats"].detach().clone()
+        refractive_quats[mask] = transformed_quats
             
 
         # 以下、ラスタライズ処理の例（既存のCUDA関数などを呼び出す）
-        quats = self.splats["quats"]                       # [N, 4]
         scales = torch.exp(self.splats["scales"])          # [N, 3]
         opacities = torch.sigmoid(self.splats["opacities"])  # [N]
         colors = torch.cat([self.splats["sh0"], self.splats["shN"]], dim=1)  # [N, K, 3]
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         render_colors, render_alphas, info = rasterization(
-            means=transformed_means,
-            quats=quats,
+            means=refractive_means,
+            quats=refractive_quats,
             scales=scales,
             opacities=opacities,
             colors=colors,
