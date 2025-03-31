@@ -53,7 +53,6 @@ from gsplat.utils import save_ply
 
 # function to transform Gaussians location for Refraction Rasterization
 from refraction_utils_torch import culling_points_torch
-from refraction_utils_torch import transform_with_ste_custom, transform_with_detach_identity
 from refraction_utils_torch import RefractionSTE
 
 ### ======== Config クラス – 設定オブジェクト ======== ###
@@ -688,19 +687,19 @@ class Runner:
                     render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                     masks=masks,
                 )
-            # else:
-                # renders, alphas, info = self.rasterize_splats(
-                #     camtoworlds=camtoworlds,
-                #     Ks=Ks,
-                #     width=width,
-                #     height=height,
-                #     sh_degree=sh_degree_to_use,
-                #     near_plane=cfg.near_plane,
-                #     far_plane=cfg.far_plane,
-                #     image_ids=image_ids,
-                #     render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-                #     masks=masks,
-                # )                
+            else:
+                renders, alphas, info = self.rasterize_splats(
+                    camtoworlds=camtoworlds,
+                    Ks=Ks,
+                    width=width,
+                    height=height,
+                    sh_degree=sh_degree_to_use,
+                    near_plane=cfg.near_plane,
+                    far_plane=cfg.far_plane,
+                    image_ids=image_ids,
+                    render_mode="RGB+ED" if cfg.depth_loss else "RGB",
+                    masks=masks,
+                )                
             # 深度がある場合は4ch(RGB+Depth)になるため、RGBとDで分離
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
