@@ -113,6 +113,7 @@ class RefractionSTE(torch.autograd.Function):
         # forward では、torchのみの屈折変換関数を呼ぶ
         transformed = transform_all_gaussians_torch(original_means, cam_center, n, plane, num_iters, tol)
         return transformed
+        # return original_means
 
     @staticmethod
     def backward(ctx, grad_output):

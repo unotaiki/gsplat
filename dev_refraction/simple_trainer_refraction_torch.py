@@ -195,7 +195,7 @@ class Config:
     ### ========= ADDED ============ ###
     
     # initialize river
-    num_init_points: int = 1e5
+    num_init_points: int = 1e4
     
     # Refraction
     flag_refraction: bool = True
@@ -206,7 +206,7 @@ class Config:
     use_custom_ste: bool = True
     
     num_iter_newtom: int = 8 # ニュートン法の反復回数を制御
-    tol_newton: float = 1e-2  # ニュートン法の精度
+    tol_newton: float = 1e-3  # ニュートン法の精度
     
     # Strategy
     # ADC
@@ -519,7 +519,7 @@ class Runner:
     ) -> Tuple[Tensor, Tensor, Dict]:
         
         # copy tensors to numpy
-        means = self.splats["means"] # [N, 3]
+        means = self.splats["means"].clone().detach()      # [N, 3]
         cam_center = camtoworlds[0, :3, 3] # [1, 3]
         
         # Culling : Remove gaussians out of veiw frustum
@@ -530,14 +530,14 @@ class Runner:
             if use_custom_ste:
                 transformes_culled_means = transform_with_ste_custom(culled_means, cam_center, n, plane, num_iters_newton, tol_newton)
             else:
-                transformed_culled = transform_with_detach_identity(culled_means, cam_center, n, plane, num_iters_newton, tol_newton)
-            transformed_means = means.clone()
+                transformed_culled_means = transform_with_detach_identity(culled_means, cam_center, n, plane, num_iters_newton, tol_newton)
+            transformed_means = self.splats["means"].clone()
             transformed_means[mask] = transformes_culled_means
         else:
-            transformed_means = means
+            transformed_means = self.splats["means"].clone()
             
         # 補正後の Gaussian 中心で更新
-        self.splats["means"] = transformed_means
+        # self.splats["means"] = transformed_means
 
         # 以下、ラスタライズ処理の例（既存のCUDA関数などを呼び出す）
         quats = self.splats["quats"]                       # [N, 4]
@@ -570,6 +570,8 @@ class Runner:
         )
         if masks is not None:
             render_colors[~masks] = 0
+        
+        
         return render_colors, render_alphas, info
         
         
@@ -676,18 +678,18 @@ class Runner:
                     masks=masks,
                 )
             # else:
-            #     renders, alphas, info = self.rasterize_splats(
-            #         camtoworlds=camtoworlds,
-            #         Ks=Ks,
-            #         width=width,
-            #         height=height,
-            #         sh_degree=sh_degree_to_use,
-            #         near_plane=cfg.near_plane,
-            #         far_plane=cfg.far_plane,
-            #         image_ids=image_ids,
-            #         render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-            #         masks=masks,
-            #     )                
+                # renders, alphas, info = self.rasterize_splats(
+                #     camtoworlds=camtoworlds,
+                #     Ks=Ks,
+                #     width=width,
+                #     height=height,
+                #     sh_degree=sh_degree_to_use,
+                #     near_plane=cfg.near_plane,
+                #     far_plane=cfg.far_plane,
+                #     image_ids=image_ids,
+                #     render_mode="RGB+ED" if cfg.depth_loss else "RGB",
+                #     masks=masks,
+                # )                
             # 深度がある場合は4ch(RGB+Depth)になるため、RGBとDで分離
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
@@ -1144,8 +1146,8 @@ if __name__ == "__main__":
             Config(
                 init_opa=0.5,
                 init_scale=0.1,
-                opacity_reg=0.01,
-                scale_reg=0.01,
+                opacity_reg=Config.opacity_reg,
+                scale_reg=Config.scale_reg,
                 strategy=MCMCStrategy(verbose=True,
                                       ratio_increase_new_gs=Config.mcmc_ratio_increase_new_gs),
             ),

@@ -241,6 +241,7 @@ def rasterization(
     assert Ks.shape == (C, 3, 3), Ks.shape
     assert render_mode in ["RGB", "D", "ED", "RGB+D", "RGB+ED"], render_mode
 
+    # 分散学習でのみ使用
     def reshape_view(C: int, world_view: torch.Tensor, N_world: list) -> torch.Tensor:
         view_list = list(
             map(
@@ -312,6 +313,14 @@ def rasterization(
         calc_compensations=(rasterize_mode == "antialiased"),
         camera_model=camera_model,
     )
+    # ->
+            # camera_ids: どのカメラに映るか
+            # gaussian_ids: どのガウスか
+            # radii: スクリーン上の半径
+            # means2d: 投影された画面上の中心
+            # depths: z軸深度
+            # conics: 2D楕円の共分散情報（逆行列）
+            # compensations: 抗エイリアス補正係数（Mip-Splatting）
 
     if packed:
         # The results are packed into shape [nnz, ...]. All elements are valid.
@@ -494,6 +503,10 @@ def rasterization(
     # Identify intersecting tiles
     tile_width = math.ceil(width / float(tile_size))
     tile_height = math.ceil(height / float(tile_size))
+    # 各ガウスが、画面のどのタイルに影響を与えるか（交差しているか）を計算
+        # isect_ids: タイルとガウスのペアID（どこに影響を与えるか）
+        # flatten_ids: 上記を1次元インデックスに変換
+        # tiles_per_gauss: 各ガウスがヒットするタイルの数（可視性マスク的）
     tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(
         means2d,
         radii,
@@ -507,6 +520,8 @@ def rasterization(
         gaussian_ids=gaussian_ids,
     )
     # print("rank", world_rank, "Before isect_offset_encode")
+    # タイル毎にどのガウスが影響を与えるかのインデックスを圧縮形式でエンコード
+    # → 後で高速にループ処理するための準備
     isect_offsets = isect_offset_encode(isect_ids, C, tile_width, tile_height)
 
     meta.update(
@@ -524,7 +539,10 @@ def rasterization(
         }
     )
 
+    # ピクセル単位の最終レンダリング実行
     # print("rank", world_rank, "Before rasterize_to_pixels")
+    # チャンネル数が多い場合：チャンク分けでレンダリング
+    # → 一度に大量のチャンネル（例: SHの高次数展開）を処理するとGPUメモリが足りないことがあるので、チャンクごとに処理
     if colors.shape[-1] > channel_chunk:
         # slice into chunks
         n_chunks = (colors.shape[-1] + channel_chunk - 1) // channel_chunk
@@ -555,7 +573,7 @@ def rasterization(
         render_colors = torch.cat(render_colors, dim=-1)
         render_alphas = render_alphas[0]  # discard the rest
     else:
-        render_colors, render_alphas = rasterize_to_pixels(
+        render_colors, render_alphas = rasterize_to_pixels( # 実際に2Dガウスをピクセル単位で合成（ブレンド）する関数
             means2d,
             conics,
             colors,
@@ -573,8 +591,8 @@ def rasterization(
         # normalize the accumulated depth to get the expected depth
         render_colors = torch.cat(
             [
-                render_colors[..., :-1],
-                render_colors[..., -1:] / render_alphas.clamp(min=1e-10),
+                render_colors[..., :-1],                                    # RGB
+                render_colors[..., -1:] / render_alphas.clamp(min=1e-10),   # z / α
             ],
             dim=-1,
         )
