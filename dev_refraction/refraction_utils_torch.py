@@ -40,7 +40,7 @@ def newton_solve_quartic_torch(r: torch.Tensor, h: torch.Tensor, H: float, n: fl
         s = s_new
     return s
 
-def transform_all_gaussians_torch(means: torch.Tensor, cam_center: torch.Tensor, n: float = 1.33, plane: float = 0, num_iters: int = 10, tol: float = 1e-6) -> torch.Tensor:
+def transform_gaussians_torch(means: torch.Tensor, cam_center: torch.Tensor, n: float = 1.33, plane: float = 0, num_iters: int = 10, tol: float = 1e-6) -> torch.Tensor:
     """
     GPU上の torch.Tensor (shape: [N, 3]) に対して、
     カメラ中心 cam_center ([3]) および水面 z = plane を基準に屈折補正を適用する関数。
@@ -57,6 +57,7 @@ def transform_all_gaussians_torch(means: torch.Tensor, cam_center: torch.Tensor,
     s = newton_solve_quartic_torch(r, h, H, n, num_iters=num_iters, tol=tol)
     # 物理的制約として s < r となるように clamping（必要に応じて調整）
     s = torch.where(s < r, s, r * 0.99)
+
     
     # 入射角・屈折角の計算
     theta0 = torch.atan(s / H)
@@ -78,7 +79,7 @@ def transform_all_gaussians_torch(means: torch.Tensor, cam_center: torch.Tensor,
     
     return torch.stack([new_x, new_y, new_z], dim=1)  # [N, 3]
 
-def culling_points_torch(points: torch.Tensor, W2C: torch.Tensor, K: torch.Tensor, width: int, height: int) -> torch.Tensor:
+def culling_points_torch(points: torch.Tensor, W2C: torch.Tensor, K: torch.Tensor, width: int, height: int, mergin_factor: float=0.4) -> torch.Tensor:
     """
     点群 points ([N, 3]) について、カメラの視錐台内にあるかを判定する関数。
       1. 同次座標に拡張し W2C でカメラ座標系へ変換
@@ -96,8 +97,11 @@ def culling_points_torch(points: torch.Tensor, W2C: torch.Tensor, K: torch.Tenso
     proj = proj / proj[:, 2:3]
     u = proj[:, 0]
     v = proj[:, 1]
-    valid_u = (u >= 0) & (u < width)
-    valid_v = (v >= 0) & (v < height)
+    
+    w_mergin = int(width * mergin_factor)
+    h_mergin = int(height * mergin_factor)
+    valid_u = (u >= -w_mergin) & (u < width + w_mergin)
+    valid_v = (v >= -h_mergin) & (v < height + h_mergin)
     
     mask = valid_depth & valid_u & valid_v
     return mask.squeeze()  # boolean Tensor [N]
@@ -109,29 +113,16 @@ def culling_points_torch(points: torch.Tensor, W2C: torch.Tensor, K: torch.Tenso
 # アプローチ 1: カスタムAutograd Function を用いる方法
 class RefractionSTE(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, original_means, cam_center, n, plane, num_iters, tol):
-        # forward では、torchのみの屈折変換関数を呼ぶ
-        transformed = transform_all_gaussians_torch(original_means, cam_center, n, plane, num_iters, tol)
+    def forward(ctx, means, cam_center, n, plane, num_iters, tol):
+        # forward: transform means by refraction model
+        transformed = transform_gaussians_torch(means, cam_center, n, plane, num_iters, tol)
+        ctx.save_for_backward(means)  # 元の means を保存
         return transformed
-        # return original_means
 
     @staticmethod
     def backward(ctx, grad_output):
-        # backward では、変換をバイパスして入力（original_means）に対して勾配をそのまま返す
-        return grad_output, None, None, None, None, None
+        # backward: 勾配を元の means に流す
+        menas, = ctx.saved_tensors
+        return grad_output.clone(), None, None, None, None, None
 
-def transform_with_ste_custom(means: torch.Tensor, cam_center: torch.Tensor, n: float = 1.33, plane: float = 0, num_iters: int = 10, tol: float = 1e-6) -> torch.Tensor:
-    """
-    カスタムAutograd Function を用いた STE のラッパー関数。
-    forward は屈折補正後の値を返すが、backward では元の means に対して勾配が流れる。
-    """
-    return RefractionSTE.apply(means, cam_center, n, plane, num_iters, tol)
 
-# アプローチ 2: Detach & Identity Gradient Trick を用いる方法
-def transform_with_detach_identity(means: torch.Tensor, cam_center: torch.Tensor, n: float = 1.33, plane: float = 0, num_iters: int = 10, tol: float = 1e-6) -> torch.Tensor:
-    """
-    Detach と identity gradient trick を用いた STE のラッパー関数。
-    forward は屈折補正後の値を返すが、backward では元の means に対して勾配が流れる。
-    """
-    transformed_detached = transform_all_gaussians_torch(means.detach(), cam_center, n, plane, num_iters, tol)
-    return transformed_detached + (means - means.detach())

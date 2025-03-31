@@ -54,6 +54,7 @@ from gsplat.utils import save_ply
 # function to transform Gaussians location for Refraction Rasterization
 from refraction_utils_torch import culling_points_torch
 from refraction_utils_torch import transform_with_ste_custom, transform_with_detach_identity
+from refraction_utils_torch import RefractionSTE
 
 ### ======== Config クラス – 設定オブジェクト ======== ###
 # Gaussian Splattingのトレーニングや評価に使うパラメータ群をまとめている設定用のデータクラス
@@ -518,26 +519,36 @@ class Runner:
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         
-        # copy tensors to numpy
-        means = self.splats["means"].clone().detach()      # [N, 3]
-        cam_center = camtoworlds[0, :3, 3] # [1, 3]
+        cam_center = camtoworlds[0, :3, 3]  # [C, 3]
         
-        # Culling : Remove gaussians out of veiw frustum
-        mask = culling_points_torch(means, camtoworlds, Ks, width, height)
-        if mask.sum() > 0:
-            culled_means = means[mask]
-            # Refractive Transform
-            if use_custom_ste:
-                transformes_culled_means = transform_with_ste_custom(culled_means, cam_center, n, plane, num_iters_newton, tol_newton)
-            else:
-                transformed_culled_means = transform_with_detach_identity(culled_means, cam_center, n, plane, num_iters_newton, tol_newton)
-            transformed_means = self.splats["means"].clone()
-            transformed_means[mask] = transformes_culled_means
-        else:
-            transformed_means = self.splats["means"].clone()
+        # Mask for applying refraction
+        # Culling (Get the points that are in the camera frustum)
+        mask_culling = culling_points_torch(
+            self.splats["means"],
+            torch.inverse(camtoworlds),
+            Ks,
+            width=width,
+            height=height,
+        )
+        # 屈折面の後方にあるGaussianを選択
+        mask_below_surface = (self.splats["means"][:, 2] < plane)
+        # Combine the masks
+        mask = mask_culling & mask_below_surface
+        
+        # Apply transformation
+        transformed = RefractionSTE.apply(
+            self.splats["means"][mask],
+            cam_center,
+            n,
+            plane,
+            num_iters_newton,
+            tol_newton
+        )
+        
+        # Recreate the splats with transformed means
+        transformed_means = self.splats["means"].detach().clone()
+        transformed_means[mask] = transformed
             
-        # 補正後の Gaussian 中心で更新
-        # self.splats["means"] = transformed_means
 
         # 以下、ラスタライズ処理の例（既存のCUDA関数などを呼び出す）
         quats = self.splats["quats"]                       # [N, 4]
