@@ -54,6 +54,7 @@ from gsplat.utils import save_ply
 # function to transform Gaussians location for Refraction Rasterization
 from refraction_utils_torch import culling_points_torch
 from refraction_utils_torch import RefractionSTE
+from torch.autograd import gradcheck
 
 ### ======== Config クラス – 設定オブジェクト ======== ###
 # Gaussian Splattingのトレーニングや評価に使うパラメータ群をまとめている設定用のデータクラス
@@ -534,6 +535,10 @@ class Runner:
         # Combine the masks
         mask = mask_culling & mask_below_surface
         
+        test_input = (
+            self.splats["means"],
+            self.splats["quats"]
+        )
         # Apply transformation
         transformed_means, transformed_quats = RefractionSTE.apply(
             self.splats["means"][mask],
@@ -544,13 +549,18 @@ class Runner:
             num_iters_newton,
             tol_newton
         )
+        test = gradcheck(RefractionSTE.apply, test_input, eps=1e-6)
+        assert test, "Gradient check failed"
         
         # Recreate the splats with transformed means
-        refractive_means = self.splats["means"].detach().clone()
+        refractive_means = torch.zeros_like(self.splats["means"])
         refractive_means[mask] = transformed_means
+        refractive_means[~mask] = self.splats["means"][~mask]
         
-        refractive_quats = self.splats["quats"].detach().clone()
+        # Recreate the splats with transformed quats
+        refractive_quats = torch.zeros_like(self.splats["quats"])
         refractive_quats[mask] = transformed_quats
+        refractive_quats[~mask] = self.splats["quats"][~mask]
             
 
         # 以下、ラスタライズ処理の例（既存のCUDA関数などを呼び出す）

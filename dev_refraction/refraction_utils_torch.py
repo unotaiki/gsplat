@@ -1,4 +1,5 @@
 import torch
+from internal.utils.gaussian_utils import GaussianTransformUtils
 
 ###############################################################################
 # 1. GPU上で動作する屈折変換のための補助関数群
@@ -60,7 +61,8 @@ def transform_gaussians_torch(means: torch.Tensor, quats: torch.Tensor, cam_cent
 
     # 入射角・屈折角の計算
     theta0 = torch.atan(s / H)
-    h_safe = torch.where(torch.abs(h) < tol, torch.full_like(h, tol), h)
+    h_safe = h.clone()
+    h_safe[h.abs() < tol] = tol * torch.sign(h[h.abs() < tol])
     theta1 = torch.atan((s - r) / h_safe)
     
     # 補正量の計算
@@ -80,6 +82,10 @@ def transform_gaussians_torch(means: torch.Tensor, quats: torch.Tensor, cam_cent
     
     
     # ======= Rotation =========
+    flag_rotation = True
+    # flag_rotation = False
+    
+    
     # set the rotation axis
     dir = torch.stack([dx_app, dy_app, z_app-H],dim=1 )  # [N, 3]
     z_axis = torch.tensor([0, 0, 1], device=means.device, dtype=means.dtype).expand_as(dir)  # [N, 3]
@@ -99,12 +105,22 @@ def transform_gaussians_torch(means: torch.Tensor, quats: torch.Tensor, cam_cent
     d_quat = torch.cat([d_qw, d_q], dim=1)          # [N, 4]
     
     # rotate the quaternion
-    new_quats = d_quat @ quats  # [N, 4]
-    new_quats = torch.nn.functional.normalize(new_quats, dim=1)  # [N, 4] 
-    
+    if flag_rotation:
+        new_quats = GaussianTransformUtils.quat_multiply(d_quat, quats) # 正解? # [N, 4]
+        # new_quats = GaussianTransformUtils.quat_multiply(quats, d_quat) # 反対 # [N, 4]
+    else:
+        new_quats = quats.clone()
+
     return new_means, new_quats
 
-def culling_points_torch(points: torch.Tensor, W2C: torch.Tensor, K: torch.Tensor, width: int, height: int, mergin_factor: float=0.4) -> torch.Tensor:
+def culling_points_torch(
+    points: torch.Tensor, 
+    W2C: torch.Tensor, 
+    K: torch.Tensor, 
+    width: int, 
+    height: int, 
+    mergin_factor: float=0.0
+    ) -> torch.Tensor:
     """
     点群 points ([N, 3]) について、カメラの視錐台内にあるかを判定する関数。
       1. 同次座標に拡張し W2C でカメラ座標系へ変換
@@ -141,13 +157,13 @@ class RefractionSTE(torch.autograd.Function):
     def forward(ctx, means, quats, cam_center, n, plane, num_iters, tol):
         # forward: transform means by refraction model
         transformed_means, transformed_quats = transform_gaussians_torch(means, quats, cam_center, n, plane, num_iters, tol)
-        ctx.save_for_backward(means, quats)  # 元の means を保存
+        ctx.save_for_backward(means, quats)  # 元の値を保存
         return transformed_means, transformed_quats
 
     @staticmethod
-    def backward(ctx, grad_output):
-        # backward: 勾配を元の means に流す
-        menas, quatas, = ctx.saved_tensors
-        return grad_output.clone(), grad_output.clone(), None, None, None, None, None
+    def backward(ctx, grad_means, grad_quats):
+        # backward: 元の勾配を流す
+        means, quats  = ctx.saved_tensors  # Unpack only if needed, or use placeholders
+        return grad_means, grad_quats, None, None, None, None, None, None
 
 
