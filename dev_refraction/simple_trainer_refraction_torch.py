@@ -81,7 +81,7 @@ class Config:
     # Downsample factor for the dataset
     data_factor: int = 4
     # Directory to save results
-    datetime = time.strftime("%Y%m%d-%H%M%S")
+    datetime = time.strftime("%Y-%m%d_%H-%M")
     result_dir: str = f"results/{datetime}_{os.path.basename(refraction_dir)}" 
     # Every N images there is a test image
     test_every: int = 8
