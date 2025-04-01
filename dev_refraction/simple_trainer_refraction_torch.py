@@ -535,10 +535,6 @@ class Runner:
         # Combine the masks
         mask = mask_culling & mask_below_surface
         
-        test_input = (
-            self.splats["means"],
-            self.splats["quats"]
-        )
         # Apply transformation
         transformed_means, transformed_quats = RefractionSTE.apply(
             self.splats["means"][mask],
@@ -549,8 +545,6 @@ class Runner:
             num_iters_newton,
             tol_newton
         )
-        test = gradcheck(RefractionSTE.apply, test_input, eps=1e-6)
-        assert test, "Gradient check failed"
         
         # Recreate the splats with transformed means
         refractive_means = torch.zeros_like(self.splats["means"])
