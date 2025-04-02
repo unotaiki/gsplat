@@ -72,10 +72,6 @@ class Config:
     render_traj_path: str = "ellipse"
 
     # Path to the Mip-NeRF 360 dataset
-    # refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "OneDrive", "3d_map_data", "20250327_simple-river", \
-    #     "20250327-1656_simple-river-cos_refraction_env10_angle-40"))
-    # non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "OneDrive", "3d_map_data", "20250327_simple-river", \
-    #     "20250327-1750_simple-river-cos_wo-refraction_env3_angle-40"))
     refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_with-refraction"))
     non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_wo-refraction"))
     # Downsample factor for the dataset
@@ -213,7 +209,13 @@ class Config:
     # ADC
     prune_opa: float = 0.1
     # MCMC
-    mcmc_ratio_increase_new_gs: float = 1.05
+    ratio_increase_new_gs: float = 1.05
+    reset_every: int = 2000
+    prune_opa: float = 0.005
+    prune_large_gs: bool = True
+    prune_scale3d: float = 0.1
+    prune_scale2d: float = 0.15
+    refine_scale2d_stop_iter: int = 0
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -232,7 +234,7 @@ class Config:
             strategy.refine_start_iter = int(strategy.refine_start_iter * factor)
             strategy.refine_stop_iter = int(strategy.refine_stop_iter * factor)
             strategy.refine_every = int(strategy.refine_every * factor)
-            strategy.ratio_increase_new_gs = cfg.mcmc_ratio_increase_new_gs
+            strategy.ratio_increase_new_gs = cfg.ratio_increase_new_gs
         else:
             assert_never(strategy)
             
@@ -519,45 +521,74 @@ class Runner:
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         
+        
         cam_center = camtoworlds[0, :3, 3]  # [C, 3]
         
         # Mask for applying refraction
         # Culling (Get the points that are in the camera frustum)
-        mask_culling = culling_points_torch(
-            self.splats["means"],
-            torch.inverse(camtoworlds),
-            Ks,
-            width=width,
-            height=height,
-        )
-        # 屈折面の後方にあるGaussianを選択
-        mask_below_surface = (self.splats["means"][:, 2] < plane)
-        # Combine the masks
-        mask = mask_culling & mask_below_surface
+        with torch.no_grad():
+            mask_culling = culling_points_torch(
+                self.splats["means"],
+                torch.inverse(camtoworlds),
+                Ks,
+                width=width,
+                height=height,
+            )
+            # 屈折面の後方にあるGaussianを選択
+            mask_below_surface = (self.splats["means"][:, 2] < plane)
+            # Combine the masks
+            mask = mask_culling & mask_below_surface
+        # mask to float tensor
+        mask_f = mask.float().unsqueeze(-1) 
         
-        # Apply transformation
+        # ===== New Implementation =====
+        
+        # 全要素に対して変換を適用（マスクで重み付け）
         transformed_means, transformed_quats = RefractionSTE.apply(
-            self.splats["means"][mask],
-            self.splats["quats"][mask],
+            self.splats["means"],
+            self.splats["quats"],
             cam_center,
             n,
             plane,
             num_iters_newton,
             tol_newton
+        )       
+        
+        refractive_means = (
+            self.splats["means"] * (1 - mask_f) + transformed_means * mask_f
+        ) 
+        
+        refractive_quats = (
+            self.splats["quats"] * (1 - mask_f) + transformed_quats * mask_f
         )
         
-        # Recreate the splats with transformed means
-        refractive_means = torch.zeros_like(self.splats["means"])
-        refractive_means[mask] = transformed_means
-        refractive_means[~mask] = self.splats["means"][~mask]
+        # # ===== Old Imoplementation =====
         
-        # Recreate the splats with transformed quats
-        refractive_quats = torch.zeros_like(self.splats["quats"])
-        refractive_quats[mask] = transformed_quats
-        refractive_quats[~mask] = self.splats["quats"][~mask]
-            
+        # # Apply transformation
+        # transformed_means, transformed_quats = RefractionSTE.apply(
+        #     self.splats["means"][mask],
+        #     self.splats["quats"][mask],
+        #     cam_center,
+        #     n,
+        #     plane,
+        #     num_iters_newton,
+        #     tol_newton
+        # )
+        
+        # # Recreate the splats with transformed means
+        # refractive_means = torch.zeros_like(self.splats["means"])
+        # refractive_means[mask] = transformed_means
+        # refractive_means[~mask] = self.splats["means"][~mask]
+        
+        # # Recreate the splats with transformed quats
+        # refractive_quats = torch.zeros_like(self.splats["quats"])
+        # refractive_quats[mask] = transformed_quats
+        # refractive_quats[~mask] = self.splats["quats"][~mask]
+        
+        
+        # # ===========
 
-        # 以下、ラスタライズ処理の例（既存のCUDA関数などを呼び出す）
+        # 以下、ラスタライズ
         scales = torch.exp(self.splats["scales"])          # [N, 3]
         opacities = torch.sigmoid(self.splats["opacities"])  # [N]
         colors = torch.cat([self.splats["sh0"], self.splats["shN"]], dim=1)  # [N, K, 3]
@@ -587,7 +618,6 @@ class Runner:
         )
         if masks is not None:
             render_colors[~masks] = 0
-        
         
         return render_colors, render_alphas, info
         
@@ -751,6 +781,10 @@ class Runner:
                 )
 
             loss.backward()
+            
+            # # check gradient throw
+            # print(f'is leaf : {self.splats["means"].is_leaf}')
+            # print(f'grad : {self.splats["means"].grad}')
             
             # 学習進捗バーに、現在の損失やSH次数、深度誤差、カメラ姿勢誤差などを表示
             desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
@@ -1166,7 +1200,14 @@ if __name__ == "__main__":
                 opacity_reg=Config.opacity_reg,
                 scale_reg=Config.scale_reg,
                 strategy=MCMCStrategy(verbose=True,
-                                      ratio_increase_new_gs=Config.mcmc_ratio_increase_new_gs),
+                                      ratio_increase_new_gs=Config.ratio_increase_new_gs,
+                                      reset_every=Config.reset_every,
+                                      prune_opa=Config.prune_opa,
+                                      prune_large_gs=Config.prune_large_gs,
+                                      prune_scale3d=Config.prune_scale3d,
+                                      prune_scale2d=Config.prune_scale2d,
+                                      refine_scale2d_stop_iter=Config.refine_scale2d_stop_iter,
+                                      ),
             ),
         ),
     }

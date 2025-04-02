@@ -152,6 +152,7 @@ def culling_points_torch(
 ###############################################################################
 
 # アプローチ 1: カスタムAutograd Function を用いる方法
+# Straight Through Estimator (STE)
 class RefractionSTE(torch.autograd.Function):
     @staticmethod
     def forward(ctx, means, quats, cam_center, n, plane, num_iters, tol):
@@ -163,7 +164,12 @@ class RefractionSTE(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_means, grad_quats):
         # backward: 元の勾配を流す
-        means, quats  = ctx.saved_tensors  # Unpack only if needed, or use placeholders
-        return grad_means, grad_quats, None, None, None, None, None, None
+        d_means = grad_means
+        d_quats = grad_quats
+        return d_means, d_quats, None, None, None, None, None, None
+    
+# class RefractionSTE(torch.autograd.Function):
+#     @staticmethod
+    
 
 
