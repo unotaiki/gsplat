@@ -22,7 +22,7 @@ def newton_solve_quartic_torch(r: torch.Tensor, h: torch.Tensor, H: float, n: fl
 
     a4 = 1 - n2
     a3 = 2 * (n2 - 1) * r
-    a2 = (1 - n2) * (h2 + r2)
+    a2 = (1 - n2)*r2 + h2 - n2 * H2
     a1 = 2 * n2 * r * H2
     a0 = - n2 * H2 * r2
 
@@ -66,17 +66,17 @@ def transform_gaussians_torch(means: torch.Tensor, quats: torch.Tensor, cam_cent
     theta1 = torch.atan((s - r) / h_safe)
     
     # 補正量の計算
-    dr = - h * (n**2 - 1) * (torch.tan(theta1)**3)  # (> 0)
-    r_app = r - dr
+    offset_r = - h * (n**2 - 1) * (torch.tan(theta1)**3)  # (> 0)
+    r_app = r - offset_r
     A = (1 - n**2 * (torch.sin(theta1)**2)).clamp(min=1e-8) ** 1.5
     z_app = h * A / (n * (torch.cos(theta1)**3))
     
-    dx_app = r_app * torch.cos(angle)
-    dy_app = r_app * torch.sin(angle)
+    x_app = r_app * torch.cos(angle)
+    y_app = r_app * torch.sin(angle)
     
     # 見かけの位置に座標変換
-    new_x = x0 + dx_app
-    new_y = y0 + dy_app
+    new_x = x0 + x_app
+    new_y = y0 + y_app
     new_z = plane + z_app
     new_means = torch.stack([new_x, new_y, new_z], dim=1)  # [N, 3]
     
@@ -87,7 +87,7 @@ def transform_gaussians_torch(means: torch.Tensor, quats: torch.Tensor, cam_cent
     
     
     # set the rotation axis
-    dir = torch.stack([dx_app, dy_app, z_app-H],dim=1 )  # [N, 3]
+    dir = torch.stack([x_app, y_app, z_app-H],dim=1 )  # [N, 3]
     z_axis = torch.tensor([0, 0, 1], device=means.device, dtype=means.dtype).expand_as(dir)  # [N, 3]
     
     # rotation axis is the cross product of dir and z_axis
@@ -95,23 +95,34 @@ def transform_gaussians_torch(means: torch.Tensor, quats: torch.Tensor, cam_cent
     rot_axis = torch.nn.functional.normalize(rot_axis, dim=1)  # [N, 3]
     
     # rotation angle
-    d_theta = theta0 - theta1
+    delta_theta = theta0 - theta1
     
     # rotation quaternion
-    half_d_theta = d_theta / 2
-    sin_half_d_theta = torch.sin(half_d_theta)
-    d_qw = torch.cos(half_d_theta).unsqueeze(1)     # [N, 1]
-    d_q = rot_axis * sin_half_d_theta.unsqueeze(1)  # [N, 3]
-    d_quat = torch.cat([d_qw, d_q], dim=1)          # [N, 4]
+    half_d_theta = delta_theta / 2
+    sin_half_delta_theta = torch.sin(half_d_theta)
+    delta_qw = torch.cos(half_d_theta).unsqueeze(1)     # [N, 1]
+    delta_qxqyqz = rot_axis * sin_half_delta_theta.unsqueeze(1)  # [N, 3]
+    delta_quat = torch.cat([delta_qw, delta_qxqyqz], dim=1)          # [N, 4]
     
     # rotate the quaternion
     if flag_rotation:
-        new_quats = GaussianTransformUtils.quat_multiply(d_quat, quats) # 正解? # [N, 4]
+        new_quats = GaussianTransformUtils.quat_multiply(delta_quat, quats) # 正解? # [N, 4]
         # new_quats = GaussianTransformUtils.quat_multiply(quats, d_quat) # 反対 # [N, 4]
     else:
         new_quats = quats.clone()
+        
+    
 
-    return new_means, new_quats
+    return new_means, new_quats, theta0, theta1, s, r_app, offset_r
+
+def dtheta1_dtheta0(
+    theta0: torch.Tensor,
+    theta1: torch.Tensor,
+    n: float,
+):
+    return torch.cos(theta0) / (n * torch.cos(theta1))
+
+
 
 def culling_points_torch(
     points: torch.Tensor, 

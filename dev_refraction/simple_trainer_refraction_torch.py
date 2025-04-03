@@ -213,7 +213,7 @@ class Config:
     reset_every: int = 2000
     prune_opa: float = 0.005
     prune_large_gs: bool = True
-    prune_scale3d: float = 0.1
+    prune_scale3d: float = 3.0
     prune_scale2d: float = 0.15
     refine_scale2d_stop_iter: int = 0
 

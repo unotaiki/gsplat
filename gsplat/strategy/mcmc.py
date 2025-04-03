@@ -60,7 +60,7 @@ class MCMCStrategy(Strategy):
     
     prune_opa: float = 0.005
     prune_large_gs: bool = True
-    prune_scale3d: float = 0.1
+    prune_scale3d: float = 3.0
     prune_scale2d: float = 0.15
     refine_scale2d_stop_iter: int = 0
     
@@ -135,6 +135,8 @@ class MCMCStrategy(Strategy):
             and step > self.refine_start_iter
             and step % self.refine_every == 0
         ):
+            
+            
             # teleport GSs
             n_relocated_gs = self._relocate_gs(params, optimizers, binoms)
             if self.verbose:
@@ -147,16 +149,16 @@ class MCMCStrategy(Strategy):
                     f"Step {step}: Added {n_new_gs} GSs. "
                     f"Now having {len(params['means'])} GSs."
                 )
-            
-            # remove large GSs
-            if self.prune_large_gs:
-                n_prune = self._prune_gs(params, optimizers, state, step)
-                if self.verbose:
-                    print(
-                        f"Step {step}: {n_prune} GSs pruned. "
-                        f"Now having {len(params['means'])} GSs."
-                    )
-
+                
+            # # remove large GSs
+            # if step % self.reset_every == 0 or step == 600:
+            #     if self.prune_large_gs:
+            #         n_prune = self._prune_gs(params, optimizers, state, step)
+            #         if self.verbose:
+            #             print(
+            #                 f"Step {step}: {n_prune} GSs pruned. "
+            #                 f"Now having {len(params['means'])} GSs."
+            #             )
 
             torch.cuda.empty_cache()
 
@@ -208,32 +210,25 @@ class MCMCStrategy(Strategy):
         return n_gs
     
 
-    @torch.no_grad()
-    def _prune_gs(
-        self,
-        params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
-        optimizers: Dict[str, torch.optim.Optimizer],
-        state: Dict[str, Any],
-        step: int,
-    ) -> int:
-        is_prune = torch.sigmoid(params["opacities"].flatten()) < self.prune_opa
-        if step > self.reset_every:
-            is_too_big = (
-                torch.exp(params["scales"]).max(dim=-1).values
-                > self.prune_scale3d 
-            )
-            # The official code also implements sreen-size pruning but
-            # it's actually not being used due to a bug:
-            # https://github.com/graphdeco-inria/gaussian-splatting/issues/123
-            # We implement it here for completeness but set `refine_scale2d_stop_iter`
-            # to 0 by default to disable it.
-            if step < self.refine_scale2d_stop_iter:
-                is_too_big |= state["radii"] > self.prune_scale2d
-                
-            is_prune = is_prune | is_too_big
+    
 
-        n_prune = is_prune.sum().item()
-        if n_prune > 0:
-            remove(params=params, optimizers=optimizers, state=state, mask=is_prune)
+    # @torch.no_grad()
+    # def _prune_gs(
+    #     self,
+    #     params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
+    #     optimizers: Dict[str, torch.optim.Optimizer],
+    #     state: Dict[str, Any],
+    #     step: int,
+    # ) -> int:
+        
+    #     is_too_big = (
+    #         torch.exp(params["scales"]).max(dim=-1).values
+    #         > self.prune_scale3d 
+    #     )
+        
+        
+    #     n_prune = is_too_big.sum().item()
+    #     if n_prune > 0:
+    #         remove(params=params, optimizers=optimizers, state=state, mask=is_too_big)
 
-        return n_prune
+    #     return n_prune
