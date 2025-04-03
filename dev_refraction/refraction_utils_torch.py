@@ -41,7 +41,14 @@ def newton_solve_quartic_torch(r: torch.Tensor, h: torch.Tensor, H: float, n: fl
         s = s_new
     return s
 
-def transform_gaussians_torch(means: torch.Tensor, quats: torch.Tensor, cam_center: torch.Tensor, n: float = 1.33, plane: float = 0, num_iters: int = 10, tol: float = 1e-6) -> torch.Tensor:
+def transform_gaussians_torch(
+    means: torch.Tensor, 
+    quats: torch.Tensor, 
+    cam_center: torch.Tensor, 
+    n: float = 1.33, 
+    plane: float = 0, 
+    num_iters: int = 10, 
+    tol: float = 1e-6) -> torch.Tensor:
     """
     GPU上の torch.Tensor (shape: [N, 3]) に対して、
     カメラ中心 cam_center ([3]) および水面 z = plane を基準に屈折補正を適用する関数。
@@ -110,18 +117,111 @@ def transform_gaussians_torch(means: torch.Tensor, quats: torch.Tensor, cam_cent
         # new_quats = GaussianTransformUtils.quat_multiply(quats, d_quat) # 反対 # [N, 4]
     else:
         new_quats = quats.clone()
+
+    # return new_means, new_quats, theta0, theta1, s, r_app, offset_r
+    return new_means, new_quats
+
+
+
+class RefractionTransform:
+    def __init__(self, 
+                 device: str = "cuda", 
+                 n: float = 1.33, 
+                 plane: float = 0
+    ):
+        self.n = torch.tensor(n, dtype=torch.float32, device=device, 
+                              requires_grad=False)
+        self.plane = torch.tensor(plane, dtype=torch.float32, device=device, 
+                                   requires_grad=False)
+        self.device = device
         
+        self.H = None
+        self.H2 = self.H ** 2
+        
+    def get_camera_center(self,
+        cam_center: torch.Tensor,
+    ):
+        self.x0, self.y0, self.H = cam_center[0], cam_center[1], cam_center[2]
+        return self.x0, self.y0, self.H
     
+    def get_gaussian_params(self,
+        means: torch.Tensor,
+        quats: torch.Tensor,
+    ):
+        self.means = means
+        self.quats = quats
+        self.x = means[:, 0] - self.x0
+        self.y = means[:, 1] - self.y0
+        self.z = means[:, 2] - self.plane
+        self.r = torch.sqrt(self.x**2 + self.y**2)
+    
+    def set_quadratic(self
+        ):
+        self.n2 = self.n ** 2
+        self.n2m1 = self.n2 - 1
+        self.H2 = self.H ** 2
+        self.r2 = self.r ** 2
+        self.z2 = self.z ** 2
+        
+    # [TODO] i dont implement this yet
+    def calc_s(self,
+        num_iters: int = 10,
+        tol: float = 1e-2
+    ):
+        # Newton法で s を求める
+        s = newton_solve_quartic_torch(self.r, self.z, self.H, self.n, num_iters=num_iters, tol=tol)
+        # 物理的制約として s < r となるように clamping（必要に応じて調整）
+        self.s = torch.where(s < self.r, s, self.r * 0.99)
+        self.s2 = self.s ** 2
+        return self.s
 
-    return new_means, new_quats, theta0, theta1, s, r_app, offset_r
+        
+    def dtheta1_dtheta0(self,
+        theta0: torch.Tensor,
+        theta1: torch.Tensor,
+    ):
+        return torch.cos(theta0) / (self.n * torch.cos(theta1))
+    
+    def dtheta0_ds(self,
+        theta0: torch.Tensor,
+        theta1: torch.Tensor,
+        z: torch.Tensor,
+    ):
+        return self.n * torch.cos(theta1)**3 / (z * torch.cos(theta0))
+    
+    def dtheta1_ds(self,
+    ):
+        return self.dtheta1_dtheta0 * self.dtheta0_ds 
 
-def dtheta1_dtheta0(
-    theta0: torch.Tensor,
-    theta1: torch.Tensor,
-    n: float,
-):
-    return torch.cos(theta0) / (n * torch.cos(theta1))
+    def ds_dr(self,
+    ):
+        num = (self.n2m1*self.s2 + self.n2*self.H2) * (self.s-self.r) # 分子
+        denom = (self.n2m1*(2*self.s-self.r)*self.s + self.n2*self.H2) * (self.s-self.r) - self.h2*self.s # 分母
+        return num / denom
+    
+    def ds_dz(self,
+    ):
+        num = self.z*self.s2 - (self.n2m1*self.r2 + self.n2*self.H2) * self.s + self.n2*self.H2*self.r
+        demon = self.n2m1 * (2*self.s - 3*self.r) * self.s2 - self.z2*self.s
+        return num / demon
+    
+    def dra_dr(self,
+    ):
+        return 1 + 3*self.n2m1 * self.z * torch.tan(self.theta1)**2 / torch.cos(self.theta1)**2 * self.dtheta1_ds * self.ds_dr
+    
+    def dra_dz(self,  
+    ):
+        return self.n2m1 * torch.tan(self.theta1)**3 + 3*self.n2m1 * self.z * torch.tan(self.theta1)**2 / torch.cos(self.theta1)**2 * self.dtheta1_ds * self.ds_dz
 
+    def dza_dr(self,
+    ):
+        return 3*self.n2m1/self.n * torch.cos(self.theta0) * torch.sin(self.theta1) /  torch.cos(self.theta1)**4 * self.dtheta1_ds * self.ds_dr
+    
+    def dza_dz(self,
+    ):
+        return 
+    
+    
 
 
 def culling_points_torch(
