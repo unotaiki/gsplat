@@ -527,4 +527,3 @@ class RefractionSTE(torch.autograd.Function):
 #     @staticmethod
     
 
-

@@ -49,8 +49,9 @@ from gsplat.utils import save_ply
 
 # function to transform Gaussians location for Refraction Rasterization
 from refraction_utils_torch import culling_points_torch
-from refraction_utils_torch import Refraction
+from refraction_transform import Refraction
 from torch.autograd import gradcheck
+from torchviz import make_dot
 
 ### ======== Config クラス – 設定オブジェクト ======== ###
 # Gaussian Splattingのトレーニングや評価に使うパラメータ群をまとめている設定用のデータクラス
@@ -520,22 +521,22 @@ class Runner:
         
         cam_center = camtoworlds[0, :3, 3]  # [C, 3]
         
-        # Mask for applying refraction
-        # Culling (Get the points that are in the camera frustum)
-        with torch.no_grad():
-            mask_culling = culling_points_torch(
-                self.splats["means"],
-                torch.inverse(camtoworlds),
-                Ks,
-                width=width,
-                height=height,
-            )
-            # 屈折面の後方にあるGaussianを選択
-            mask_below_surface = (self.splats["means"][:, 2] < plane)
-            # Combine the masks
-            mask = mask_culling & mask_below_surface
-        # mask to float tensor
-        mask_f = mask.float().unsqueeze(-1) 
+        # # Mask for applying refraction
+        # # Culling (Get the points that are in the camera frustum)
+        # with torch.no_grad():
+        #     mask_culling = culling_points_torch(
+        #         self.splats["means"],
+        #         torch.inverse(camtoworlds),
+        #         Ks,
+        #         width=width,
+        #         height=height,
+        #     )
+        #     # 屈折面の後方にあるGaussianを選択
+        #     mask_below_surface = (self.splats["means"][:, 2] < plane)
+        #     # Combine the masks
+        #     mask = mask_culling & mask_below_surface
+        # # mask to float tensor
+        # mask_f = mask.float().unsqueeze(-1) 
         
         # ===== New Implementation =====
         
@@ -551,13 +552,13 @@ class Runner:
             tol_newton
         )       
         
-        refractive_means = (
-            self.splats["means"] * (1 - mask_f) + transformed_means * mask_f
-        ) 
+        # refractive_means = (
+        #     self.splats["means"] * (1 - mask_f) + transformed_means * mask_f
+        # ) 
         
-        refractive_quats = (
-            self.splats["quats"] * (1 - mask_f) + transformed_quats * mask_f
-        )
+        # refractive_quats = (
+        #     self.splats["quats"] * (1 - mask_f) + transformed_quats * mask_f
+        # )
         
         # # ===== Old Imoplementation =====
         
@@ -592,8 +593,8 @@ class Runner:
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         render_colors, render_alphas, info = rasterization(
-            means=refractive_means,
-            quats=refractive_quats,
+            means=transformed_means,
+            quats=transformed_quats,
             scales=scales,
             opacities=opacities,
             colors=colors,
@@ -776,6 +777,20 @@ class Runner:
                     loss
                     + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean() # scales は exp で復元
                 )
+                
+            # if step == 300:
+            #     # check param is tenser
+            #     for k, v in self.splats.items():
+            #         print(f'{k} : {v.type()}')
+            #         # print(f'grad : {v.grad}')
+            #         # print(f'grad is leaf : {v.grad.is_leaf}')
+            #         # print(f'requires grad : {v.requires_grad}')
+            #     image = make_dot(
+            #         loss,
+            #         params={k: v for k, v in self.splats.items() if v is not None}
+            #     )
+            #     image.format = "png"
+            #     image.render("graph")
 
             loss.backward()
             
