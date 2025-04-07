@@ -123,10 +123,56 @@ def transform_gaussians_torch(
     return new_means, new_quats
 
 
+class Refraction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, 
+                means, 
+                quats, 
+                cam_center, 
+                n, 
+                plane, 
+                num_iters, 
+                tol
+        ):
+        device = means.device
+        
+        RT = RefractionTransform(
+            device=device,
+            n=n,
+            plane=plane
+        )
+        
+        
+        transformed_means, jacobian = RT.transform_to_appearance(
+            means, quats, cam_center, n, plane, num_iters, tol
+        )
+        
+        ctx.save_for_backward(jacobian)  
+        return transformed_means
+    
+    @staticmethod
+    def backward(ctx, grad_means, grad_quats):
+        jacobian, = ctx.saved_tensors
+        grad_input = torch.einsum('nij,nj->ni', jacobian, grad_means)
+        print("grad_input", grad_input.shape)
+        print("grad_means", grad_means.shape)
+        print("grad_quats", grad_quats.shape)
+        
+        return grad_input, grad_quats, None, None, None, None, None, None
+    
+    
+        
+            
+        
+
+
 
 class RefractionTransform(torch.autograd.Function):
     def __init__(self, 
-                 device: str = "cuda", 
+                 device: str = "cuda",
+                 means: torch.Tensor = None,
+                 quats: torch.Tensor = None,
+                 cam_center: torch.Tensor = None, 
                  n: float = 1.33, 
                  plane: float = 0
     ):
@@ -136,25 +182,17 @@ class RefractionTransform(torch.autograd.Function):
                                    requires_grad=False)
         self.device = device
         
-        
-    def get_camera_center(self,
-        cam_center: torch.Tensor,
-    ):
         self.x0, self.y0, self.H = cam_center[0], cam_center[1], cam_center[2]
-        return self.x0, self.y0, self.H
-    
-    def get_gaussian_params(self,
-        means: torch.Tensor,
-    ):
+        
         self.means = means
+        self.quats = quats
+        self.num_g = means.shape[0]
         self.x = means[:, 0] - self.x0
         self.y = means[:, 1] - self.y0
         self.z = means[:, 2] - self.plane
         self.r = torch.sqrt(self.x**2 + self.y**2)
         self.phi = torch.atan2(self.y, self.x)
-    
-    def set_quadratic(self
-        ):
+        
         self.n2 = self.n ** 2
         self.n2m1 = self.n2 - 1
         self.H2 = self.H ** 2
@@ -162,6 +200,35 @@ class RefractionTransform(torch.autograd.Function):
         self.x2 = self.x ** 2
         self.y2 = self.y ** 2
         self.z2 = self.z ** 2
+        
+    # def get_camera_center(self,
+    #     cam_center: torch.Tensor,
+    # ):
+    #     self.x0, self.y0, self.H = cam_center[0], cam_center[1], cam_center[2]
+    #     return self.x0, self.y0, self.H
+    
+    # def get_gaussian_params(self,
+    #     means: torch.Tensor,
+    #     quats: torch.Tensor,
+    # ):
+    #     self.means = means
+    #     self.quats = quats
+    #     self.num_g = means.shape[0]
+    #     self.x = means[:, 0] - self.x0
+    #     self.y = means[:, 1] - self.y0
+    #     self.z = means[:, 2] - self.plane
+    #     self.r = torch.sqrt(self.x**2 + self.y**2)
+    #     self.phi = torch.atan2(self.y, self.x)
+    
+    # def set_quadratic(self
+    #     ):
+    #     self.n2 = self.n ** 2
+    #     self.n2m1 = self.n2 - 1
+    #     self.H2 = self.H ** 2
+    #     self.r2 = self.r ** 2
+    #     self.x2 = self.x ** 2
+    #     self.y2 = self.y ** 2
+    #     self.z2 = self.z ** 2
         
     # [TODO] i dont implement this yet
     def calc_s(self,
@@ -174,6 +241,7 @@ class RefractionTransform(torch.autograd.Function):
         self.s = torch.where(s < self.r, s, self.r * 0.99)
         self.s2 = self.s ** 2
 
+        
     
     def calc_theta(self,
     ):
@@ -202,7 +270,7 @@ class RefractionTransform(torch.autograd.Function):
     def ds_dr(self,
     ):
         num = (self.n2m1*self.s2 + self.n2*self.H2) * (self.s-self.r) # 分子
-        denom = (self.n2m1*(2*self.s-self.r)*self.s + self.n2*self.H2) * (self.s-self.r) - self.h2*self.s # 分母
+        denom = (self.n2m1*(2*self.s-self.r)*self.s + self.n2*self.H2) * (self.s-self.r) - self.z2*self.s # 分母
         return num / denom
     
     def ds_dz(self,
@@ -229,21 +297,22 @@ class RefractionTransform(torch.autograd.Function):
     
     def dPa_dP(self,
     ):
-        jacobian = torch.zeros((3, 3), device=self.device, dtype=self.means.dtype).expand_as(self.means)
-        jacobian[0, 0] = self.dra_dr * self.x2 / self.r2 + self.ra + self.y2 / self.r**3
-        jacobian[0, 1] = (self.dra_dr - self.ra / self.r) * self.x * self.y / self.r2
-        jacobian[0, 2] = self.dra_dz * self.x / self.r
-        jacobian[1, 0] = jacobian[0, 1]
-        jacobian[1, 1] = self.dra_dr * self.y2 / self.r2 + self.ra + self.x2 / self.r**3
-        jacobian[1, 2] = self.dra_dz * self.y / self.r
-        jacobian[2, 0] = jacobian[0, 2]
-        jacobian[2, 1] = jacobian[1, 2]
-        jacobian[2, 2] = self.dza_dz 
+        jacobian = torch.zeros((self.num_g, 3, 3), device=self.device, dtype=self.means.dtype).expand_as(self.means)
+        jacobian[:, 0, 0] = self.dra_dr * self.x2 / self.r2 + self.ra + self.y2 / self.r**3
+        jacobian[:, 0, 1] = (self.dra_dr - self.ra / self.r) * self.x * self.y / self.r2
+        jacobian[:, 0, 2] = self.dra_dz * self.x / self.r
+        jacobian[:, 1, 0] = jacobian[0, 1]
+        jacobian[:, 1, 1] = self.dra_dr * self.y2 / self.r2 + self.ra + self.x2 / self.r**3
+        jacobian[:, 1, 2] = self.dra_dz * self.y / self.r
+        jacobian[:, 2, 0] = jacobian[0, 2]
+        jacobian[:, 2, 1] = jacobian[1, 2]
+        jacobian[:, 2, 2] = self.dza_dz 
         
         return jacobian
     
     def transform_to_appearance(self,
         means: torch.Tensor,
+        quats: torch.Tensor,
         cam_center: torch.Tensor,
         n: float = 1.33,
         plane: float = 0,
@@ -251,7 +320,7 @@ class RefractionTransform(torch.autograd.Function):
         tol: float = 1e-6
     ):
         self.get_camera_center(cam_center)
-        self.get_gaussian_params(means)
+        self.get_gaussian_params(means, quats)
         self.set_quadratic()
         
         self.calc_s(num_iters=num_iters, tol=tol)
@@ -268,21 +337,135 @@ class RefractionTransform(torch.autograd.Function):
         return new_means, self.dPa_dP()
         
     
-    @staticmethod
-    def forward(ctx, means, quats, cam_center, n, plane, num_iters, tol):
-        transformed_means, jacobian = RefractionTransform().transform_to_appearance(
-            means, cam_center, n, plane, num_iters, tol
-        )
-        ctx.save_for_backward(means, jacobian)  # 元の値を保存
-        return transformed_means
+    # @staticmethod
+    # def forward(ctx, means, quats, cam_center, n, plane, num_iters, tol):
+    #     transformed_means, transformed_quats,jacobian = RefractionTransform().transform_to_appearance(
+    #         means, quats, cam_center, n, plane, num_iters, tol
+    #     )
+    #     ctx.save_for_backward(means, quats, jacobian)  # 元の値を保存
+    #     return transformed_means, transformed_quats
     
-    @staticmethod
-    def backward(ctx, grad_means):
-        # backward: 元の勾配を流す
-        means= ctx.saved_tensors
-        d_means = ctx.jacobian 
-        return d_means, None, None, None, None, None, None, None
+    # @staticmethod
+    # def backward(ctx, grad_means, grad_quats):
+    #     # backward: 元の勾配を流す
+    #     means= ctx.saved_tensors
+    #     d_means = ctx.jacobian 
+    #     return d_means, grad_quats, None, None, None, None, None, None
         
+        
+# class aaa(torch.autograd.Function):
+#     @staticmethod
+#     def forward(ctx, means, quats, cam_center, n, plane, num_iters, tol):
+#         # 計算に必要なパラメータを取得
+#         device = means.device
+#         n_tensor = torch.tensor(n, dtype=torch.float32, device=device)
+#         plane_tensor = torch.tensor(plane, dtype=torch.float32, device=device)
+        
+#         # 変換処理を実行
+#         transformed_means, jacobian = aaa.transform_to_appearance(
+#             means, cam_center, n_tensor, plane_tensor, num_iters, tol
+#         )
+        
+#         # 逆伝播に必要な情報を保存
+#         ctx.save_for_backward(jacobian)
+#         return transformed_means, quats  # quatsはとりあえず変更なしで返す
+
+#     @staticmethod
+#     def transform_to_appearance(means, cam_center, n, plane, num_iters, tol):
+#         device = means.device
+#         N = means.shape[0]
+        
+#         # カメラ中心を取得
+#         x0, y0, H = cam_center[0], cam_center[1], cam_center[2]
+        
+#         # Gaussianパラメータを計算
+#         x = means[:, 0] - x0
+#         y = means[:, 1] - y0
+#         z = means[:, 2] - plane
+#         r = torch.sqrt(x**2 + y**2)
+#         phi = torch.atan2(y, x)
+        
+#         # Newton法でsを計算
+#         s = newton_solve_quartic_torch(r, z, H, n, num_iters=num_iters, tol=tol)
+#         s = torch.where(s < r, s, r * 0.99)
+        
+#         # 角度計算
+#         theta0 = torch.atan(s / H)
+#         theta1 = torch.atan((s - r) / (-z))
+        
+#         # 見かけの位置計算
+#         n2 = n**2
+#         n2m1 = n2 - 1
+#         offset_r = n2m1 * z * torch.tan(theta1)**3
+#         ra = r + offset_r
+#         za = (z / n) * (torch.cos(theta0) / torch.cos(theta1))**3
+        
+#         # Jacobian計算
+#         jacobian = aaa.compute_jacobian(
+#             x, y, z, r, s, H, n, theta0, theta1, device
+#         )
+        
+#         # 新しい座標を計算
+#         new_x = x0 + ra * torch.cos(phi)
+#         new_y = y0 + ra * torch.sin(phi)
+#         new_z = plane + za
+        
+#         return torch.stack([new_x, new_y, new_z], dim=1), jacobian
+
+#     @staticmethod
+#     def compute_jacobian(x, y, z, r, s, H, n, theta0, theta1, device):
+#         N = x.shape[0]
+#         jacobian = torch.zeros((N, 3, 3), device=device)
+        
+#         # 中間変数の計算
+#         n2 = n**2
+#         n2m1 = n2 - 1
+#         cos_theta0 = torch.cos(theta0)
+#         cos_theta1 = torch.cos(theta1)
+#         tan_theta1 = torch.tan(theta1)
+        
+#         # 偏微分計算
+#         dtheta1_dtheta0 = cos_theta0 / (n * cos_theta1)
+#         dtheta0_ds = n * cos_theta1**3 / (z * cos_theta0)
+#         dtheta1_ds = dtheta1_dtheta0 * dtheta0_ds
+        
+#         # ds/drとds/dzの計算（仮実装、実際の物理モデルに合わせて修正が必要）
+#         ds_dr = torch.ones_like(r)
+#         ds_dz = torch.ones_like(z)
+        
+#         # dra/drとdra/dz
+#         dra_dr = 1 + 3 * n2m1 * z * tan_theta1**2 / cos_theta1**2 * dtheta1_ds * ds_dr
+#         dra_dz = n2m1 * tan_theta1**3 + 3 * n2m1 * z * tan_theta1**2 / cos_theta1**2 * dtheta1_ds * ds_dz
+        
+#         # dza/drとdza/dz
+#         dza_dr = 3 * n2m1 / n * cos_theta0 * torch.sin(theta1) / cos_theta1**4 * dtheta1_ds * ds_dr
+#         dza_dz = (1/n) * (cos_theta1 / cos_theta0)**3 - 3 * n2m1/n * z * cos_theta0 * torch.sin(theta1) / cos_theta1**4 * dtheta1_ds * ds_dz
+        
+#         # Jacobian行列を構築
+#         x2 = x**2
+#         y2 = y**2
+#         r2 = r**2
+#         r3 = r**3
+        
+#         jacobian[:, 0, 0] = dra_dr * x2 / r2 + (dra_dr * y2) / r3
+#         jacobian[:, 0, 1] = (dra_dr - dra_dr * x2 / r2) * x * y / r2
+#         jacobian[:, 0, 2] = dra_dz * x / r
+        
+#         jacobian[:, 1, 0] = jacobian[:, 0, 1]
+#         jacobian[:, 1, 1] = dra_dr * y2 / r2 + (dra_dr * x2) / r3
+#         jacobian[:, 1, 2] = dra_dz * y / r
+        
+#         jacobian[:, 2, 0] = dza_dr * x / r
+#         jacobian[:, 2, 1] = dza_dr * y / r
+#         jacobian[:, 2, 2] = dza_dz
+        
+#         return jacobian
+
+#     @staticmethod
+#     def backward(ctx, grad_means, grad_quats):
+#         jacobian, = ctx.saved_tensors
+#         grad_input = torch.einsum('nij,nj->ni', jacobian, grad_means)
+#         return grad_input, None, None, None, None, None, None, None
         
 
 def culling_points_torch(

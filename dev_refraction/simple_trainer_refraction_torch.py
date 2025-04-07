@@ -47,13 +47,9 @@ from gsplat.optimizers import SelectiveAdam
 from gsplat.utils import save_ply
 
 
-
-
-
-
 # function to transform Gaussians location for Refraction Rasterization
 from refraction_utils_torch import culling_points_torch
-from refraction_utils_torch import RefractionTransform
+from refraction_utils_torch import Refraction
 from torch.autograd import gradcheck
 
 ### ======== Config クラス – 設定オブジェクト ======== ###
@@ -545,7 +541,7 @@ class Runner:
         
         # 全要素に対して変換を適用（マスクで重み付け）
         # transformed_means, transformed_quats = RefractionSTE.apply(
-        transformed_means, transformed_quats = RefractionTransform.apply(
+        transformed_means, transformed_quats = Refraction.apply(
             self.splats["means"],
             self.splats["quats"],
             cam_center,
