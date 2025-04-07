@@ -39,6 +39,7 @@ def newton_solve_quartic_torch(r: torch.Tensor, h: torch.Tensor, H: float, n: fl
             s = s_new
             break
         s = s_new
+    
     return s
 
 def transform_gaussians_torch(
@@ -123,7 +124,7 @@ def transform_gaussians_torch(
 
 
 
-class RefractionTransform:
+class RefractionTransform(torch.autograd.Function):
     def __init__(self, 
                  device: str = "cuda", 
                  n: float = 1.33, 
@@ -135,8 +136,6 @@ class RefractionTransform:
                                    requires_grad=False)
         self.device = device
         
-        self.H = None
-        self.H2 = self.H ** 2
         
     def get_camera_center(self,
         cam_center: torch.Tensor,
@@ -146,14 +145,13 @@ class RefractionTransform:
     
     def get_gaussian_params(self,
         means: torch.Tensor,
-        quats: torch.Tensor,
     ):
         self.means = means
-        self.quats = quats
         self.x = means[:, 0] - self.x0
         self.y = means[:, 1] - self.y0
         self.z = means[:, 2] - self.plane
         self.r = torch.sqrt(self.x**2 + self.y**2)
+        self.phi = torch.atan2(self.y, self.x)
     
     def set_quadratic(self
         ):
@@ -161,6 +159,8 @@ class RefractionTransform:
         self.n2m1 = self.n2 - 1
         self.H2 = self.H ** 2
         self.r2 = self.r ** 2
+        self.x2 = self.x ** 2
+        self.y2 = self.y ** 2
         self.z2 = self.z ** 2
         
     # [TODO] i dont implement this yet
@@ -173,21 +173,27 @@ class RefractionTransform:
         # 物理的制約として s < r となるように clamping（必要に応じて調整）
         self.s = torch.where(s < self.r, s, self.r * 0.99)
         self.s2 = self.s ** 2
-        return self.s
 
+    
+    def calc_theta(self,
+    ):
+        self.theta0 = torch.atan(self.s / self.H)
+        self.theta1 = torch.atan((self.s - self.r) / (-self.z))
+    
+    def calc_appearance(self,
+    ):
+        self.offset_r =  self.n2m1 * self.z * (torch.tan(self.theta1)**3)    
+        self.ra = self.r + self.offset_r
+        self.za = 1/self.n * self.z * (torch.cos(self.theta0) / torch.cos(self.theta1))**3 
+        
         
     def dtheta1_dtheta0(self,
-        theta0: torch.Tensor,
-        theta1: torch.Tensor,
     ):
-        return torch.cos(theta0) / (self.n * torch.cos(theta1))
+        return torch.cos(self.theta0) / (self.n * torch.cos(self.theta1))
     
     def dtheta0_ds(self,
-        theta0: torch.Tensor,
-        theta1: torch.Tensor,
-        z: torch.Tensor,
     ):
-        return self.n * torch.cos(theta1)**3 / (z * torch.cos(theta0))
+        return self.n * torch.cos(self.theta1)**3 / (self.z * torch.cos(self.theta0))
     
     def dtheta1_ds(self,
     ):
@@ -219,10 +225,65 @@ class RefractionTransform:
     
     def dza_dz(self,
     ):
-        return 
+        return 1/self.n * (torch.cos(self.theta1) / torch.cos(self.theta0))**3 - 3*self.n2m1/self.n * self.z * torch.cos(self.theta0) * torch.sin(self.theta1) /  torch.cos(self.theta1)**4 * self.dtheta1_ds * self.ds_dz
     
+    def dPa_dP(self,
+    ):
+        jacobian = torch.zeros((3, 3), device=self.device, dtype=self.means.dtype).expand_as(self.means)
+        jacobian[0, 0] = self.dra_dr * self.x2 / self.r2 + self.ra + self.y2 / self.r**3
+        jacobian[0, 1] = (self.dra_dr - self.ra / self.r) * self.x * self.y / self.r2
+        jacobian[0, 2] = self.dra_dz * self.x / self.r
+        jacobian[1, 0] = jacobian[0, 1]
+        jacobian[1, 1] = self.dra_dr * self.y2 / self.r2 + self.ra + self.x2 / self.r**3
+        jacobian[1, 2] = self.dra_dz * self.y / self.r
+        jacobian[2, 0] = jacobian[0, 2]
+        jacobian[2, 1] = jacobian[1, 2]
+        jacobian[2, 2] = self.dza_dz 
+        
+        return jacobian
     
-
+    def transform_to_appearance(self,
+        means: torch.Tensor,
+        cam_center: torch.Tensor,
+        n: float = 1.33,
+        plane: float = 0,
+        num_iters: int = 10,
+        tol: float = 1e-6
+    ):
+        self.get_camera_center(cam_center)
+        self.get_gaussian_params(means)
+        self.set_quadratic()
+        
+        self.calc_s(num_iters=num_iters, tol=tol)
+        self.calc_theta()
+        self.calc_appearance()
+        
+        # 見かけの位置に座標変換
+        new_x = self.x0 + self.ra * torch.cos(self.phi)
+        new_y = self.y0 + self.ra * torch.sin(self.phi)
+        new_z = self.plane + self.za
+        
+        new_means = torch.stack([new_x, new_y, new_z], dim=1)
+        
+        return new_means, self.dPa_dP()
+        
+    
+    @staticmethod
+    def forward(ctx, means, quats, cam_center, n, plane, num_iters, tol):
+        transformed_means, jacobian = RefractionTransform().transform_to_appearance(
+            means, cam_center, n, plane, num_iters, tol
+        )
+        ctx.save_for_backward(means, jacobian)  # 元の値を保存
+        return transformed_means
+    
+    @staticmethod
+    def backward(ctx, grad_means):
+        # backward: 元の勾配を流す
+        means= ctx.saved_tensors
+        d_means = ctx.jacobian 
+        return d_means, None, None, None, None, None, None, None
+        
+        
 
 def culling_points_torch(
     points: torch.Tensor, 
