@@ -10,8 +10,8 @@ class Refraction(torch.autograd.Function):
                 cam_center, 
                 n, 
                 plane, 
-                num_iters, 
-                tol
+                num_newton_iters, 
+                newton_atol
         ):
         device = means.device
         
@@ -34,7 +34,8 @@ class Refraction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_means, grad_quats):
         jacobian, = ctx.saved_tensors
-        grad_input = torch.einsum('nij,nj->ni', jacobian, grad_means) # must be [N, 3]
+        # grad_input = torch.einsum('nij,nj->ni', jacobian, grad_means) # must be [N, 3]
+        grad_input = torch.bmm(grad_means.unsqueeze(1), jacobian).squeeze(1)  # [N, 3] @ [N, 3, 3] = [N, 3]
         
         return grad_input, grad_quats, None, None, None, None, None, None 
     
@@ -47,30 +48,38 @@ class Refraction(torch.autograd.Function):
 
 class RefractionTransform(torch.autograd.Function):
     def __init__(self, 
-                 device: str = "cuda",
                  means: torch.Tensor = None,
                  quats: torch.Tensor = None,
                  cam_center: torch.Tensor = None, 
                  n: float = 1.33, 
-                 plane: float = 0
+                 plane: float = 0,
+                 delta: float = 1e-2,
+                 num_newton_iters: int = 10,
+                 newton_atol: float = 1e-4,
+                 device: torch.device = torch.device("cuda:0")
     ):
+        self.device = device
         self.n = torch.tensor(n, dtype=torch.float32, device=device, 
                               requires_grad=False)
         self.plane = torch.tensor(plane, dtype=torch.float32, device=device, 
                                    requires_grad=False)
-        self.device = device
+        self.delta = delta
+        self.num_newton_iters = num_newton_iters
+        self.newton_atol = newton_atol
+        
         
         
         # define gaussian params
-        self.means = means
-        self.quats = quats
+        self.means = means.to(self.device)
+        self.quats = quats.to(device) if quats is not None else None
         self.num_g = means.shape[0]
+        self.cam_center = cam_center.to(self.device)
         
         # define the coordinate system
-        self.x0, self.y0, self.H = cam_center[0], cam_center[1], cam_center[2]
-        self.x = means[:, 0] - self.x0
-        self.y = means[:, 1] - self.y0
-        self.z = means[:, 2] - self.plane
+        self.x0, self.y0, self.H = self.cam_center[0], self.cam_center[1], self.cam_center[2]
+        self.x = self.means[:, 0] - self.x0
+        self.y = self.means[:, 1] - self.y0
+        self.z = self.means[:, 2] - self.plane
         self.r = torch.sqrt(self.x**2 + self.y**2)
         self.phi = torch.atan2(self.y, self.x)
         
@@ -84,8 +93,6 @@ class RefractionTransform(torch.autograd.Function):
         self.z2 = self.z ** 2
 
     def calc_s(self,
-        num_iters: int = 10,
-        tol: float = 1e-2
     ):
         # Newton法で s を求める
         self.solver_quartic()
@@ -95,8 +102,6 @@ class RefractionTransform(torch.autograd.Function):
         
     def solver_quartic(
         self,
-        num_iters: int = 10,
-        tol: float = 1e-2
     ):
         a4 = 1 - self.n2
         a3 = 2 * (self.n2 - 1) * self.r
@@ -105,16 +110,15 @@ class RefractionTransform(torch.autograd.Function):
         a0 = - self.n2 * self.H2 * self.r2
         
         eps = 1e-6
-        tol = 1e-2
         
         s = self.r / 1.7 + eps  # Initial guess
-        for _ in range(8):
+        for _ in range(self.num_newton_iters):
             f = a4 * s**4 + a3 * s**3 + a2 * s**2 + a1 * s + a0
             f_prime = 4 * a4 * s**3 + 3 * a3 * s**2 + 2 * a2 * s + a1
             # Avoid small gradient
-            f_prime_safe = torch.where(torch.abs(f_prime) < tol, torch.full_like(f_prime, tol), f_prime)
+            f_prime_safe = torch.where(torch.abs(f_prime) < self.newton_atol, torch.full_like(f_prime, self.newton_atol), f_prime)
             s_new = s - f / f_prime_safe
-            if torch.max(torch.abs(s_new - s)) < tol:
+            if torch.max(torch.abs(s_new - s)) < self.newton_atol:
                 break
             s = s_new
 
@@ -125,7 +129,7 @@ class RefractionTransform(torch.autograd.Function):
     def calc_theta(self,
     ):
         self.theta0 = torch.atan(self.s / self.H)
-        self.theta1 = torch.atan((self.s - self.r) / (-self.z))
+        self.theta1 = torch.atan((self.r - self.s) / (-self.z))
     
     def calc_appearance(self,
     ):
@@ -177,37 +181,86 @@ class RefractionTransform(torch.autograd.Function):
     def dPa_dP(self,
     ):
         jacobian = torch.zeros((self.num_g, 3, 3), device=self.device, dtype=self.means.dtype)
-        jacobian[:, 0, 0] = self.dra_dr() * self.x2 / self.r2 + self.ra + self.y2 / self.r**3
+        jacobian[:, 0, 0] = self.dra_dr() * self.x2 / self.r2 + self.ra * self.y2 / self.r**3
         jacobian[:, 0, 1] = (self.dra_dr() - self.ra / self.r) * self.x * self.y / self.r2
         jacobian[:, 0, 2] = self.dra_dz() * self.x / self.r
         jacobian[:, 1, 0] = jacobian[:, 0, 1]
-        jacobian[:, 1, 1] = self.dra_dr() * self.y2 / self.r2 + self.ra + self.x2 / self.r**3
+        jacobian[:, 1, 1] = self.dra_dr() * self.y2 / self.r2 + self.ra * self.x2 / self.r**3
         jacobian[:, 1, 2] = self.dra_dz() * self.y / self.r
         jacobian[:, 2, 0] = jacobian[:, 0, 2]
         jacobian[:, 2, 1] = jacobian[:, 1, 2]
         jacobian[:, 2, 2] = self.dza_dz()
         return jacobian
     
+    def dPa_dP_numerical(self,
+    ):
+        jacobian = torch.zeros((self.num_g, 3, 3), device=self.device, dtype=self.means.dtype)
+        for i in range(3):
+            delta = torch.zeros_like(self.means)
+            delta[:, i] = self.delta
+            means_plus = self.means + delta
+            means_minus = self.means - delta
+            p_RT = RefractionTransform(means=means_plus, 
+                                       quats=self.quats, 
+                                       cam_center=self.cam_center, 
+                                       n=self.n, 
+                                       plane=self.plane, 
+                                       num_newton_iters=self.num_newton_iters, 
+                                       newton_atol=self.newton_atol
+                                       )
+            m_RT = RefractionTransform(means=means_minus, 
+                                       quats=self.quats, 
+                                       cam_center=self.cam_center, 
+                                       n=self.n, 
+                                       plane=self.plane, 
+                                       num_newton_iters=self.num_newton_iters, 
+                                       newton_atol=self.newton_atol
+                                       )
+            transformed_means_plus = p_RT.transform_to_appearance()
+            transformed_means_minus = m_RT.transform_to_appearance()
+            jacobian[:, :, i] = (transformed_means_plus - transformed_means_minus) / (2 * self.delta)
+        return jacobian
+    
     def transform_to_appearance(self,
-        num_iters: int = 10,
-        tol: float = 1e-6
     ):
         
-        self.calc_s(num_iters=num_iters, tol=tol)
+        self.calc_s()
         self.calc_theta()
         self.calc_appearance()
         
         # 見かけの位置に座標変換
-        new_x = self.x0 + self.ra * torch.cos(self.phi)
-        new_y = self.y0 + self.ra * torch.sin(self.phi)
-        new_z = self.plane + self.za
+        self.new_x = self.x0 + self.ra * torch.cos(self.phi)
+        self.new_y = self.y0 + self.ra * torch.sin(self.phi)
+        self.new_z = self.plane + self.za
         
-        new_means = torch.stack([new_x, new_y, new_z], dim=1)
+        new_means = torch.stack([self.new_x, self.new_y, self.new_z], dim=1)
         return new_means
 
-
-        
+def transform_with_refraction(
+    means=torch.tensor([[2.0, 2.0, -2.0]]),
+    quats=None, 
+    cam_center=torch.tensor([0.0, 0.0, 2.0]), 
+    n=1.33, 
+    plane=0, 
+    num_newton_iters=10, 
+    newton_atol=1e-6
+):
+    RT = RefractionTransform(means=means,
+                             quats=quats,
+                             cam_center=cam_center,
+                             n=n,
+                             plane=plane,
+                             num_newton_iters=num_newton_iters,
+                             newton_atol=newton_atol)
+    trandformed_means = RT.transform_to_appearance()
+    dra_dr = RT.dra_dr()
+    dra_dz = RT.dra_dz()
+    dza_dr = RT.dza_dr()
+    dza_dz = RT.dza_dz()
+    jacobian = RT.dPa_dP()
+    return trandformed_means, dra_dr, dra_dz, dza_dr, dza_dz, jacobian
     
+# Numerical Derivative
 
         
 

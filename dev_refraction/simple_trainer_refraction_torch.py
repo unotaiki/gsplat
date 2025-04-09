@@ -69,8 +69,10 @@ class Config:
     render_traj_path: str = "ellipse"
 
     # Path to the Mip-NeRF 360 dataset
-    refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_with-refraction"))
-    non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_wo-refraction"))
+    # refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_with-refraction"))
+    # non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_wo-refraction"))
+    refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1_FOV70", "river_FOV70_REF"))
+    non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1_FOV70", "river_FOV70_woREF"))
     # Downsample factor for the dataset
     data_factor: int = 4
     # Directory to save results
