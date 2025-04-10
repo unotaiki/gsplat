@@ -10,8 +10,6 @@ class Refraction(torch.autograd.Function):
                 cam_center, 
                 n, 
                 plane, 
-                num_newton_iters, 
-                newton_atol
         ):
         device = means.device
         
@@ -25,8 +23,7 @@ class Refraction(torch.autograd.Function):
         )
         
         transformed_means = RT.transform_to_appearance()
-        
-        jacobian = RT.dPa_dP()
+        jacobian = RT.dPa_dP_numerical()
         
         ctx.save_for_backward(jacobian)  
         return transformed_means, quats
@@ -37,7 +34,7 @@ class Refraction(torch.autograd.Function):
         # grad_input = torch.einsum('nij,nj->ni', jacobian, grad_means) # must be [N, 3]
         grad_input = torch.bmm(grad_means.unsqueeze(1), jacobian).squeeze(1)  # [N, 3] @ [N, 3, 3] = [N, 3]
         
-        return grad_input, grad_quats, None, None, None, None, None, None 
+        return grad_input, grad_quats, None, None, None, None
     
     
         
