@@ -68,8 +68,8 @@ class Config:
     render_traj_path: str = "ellipse"
 
     # Path to the Mip-NeRF 360 dataset
-    refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_with-refraction"))
-    non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_wo-refraction"))
+    refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river2", "refraction"))
+    non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river2", "wo_refraction"))
     # refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1_FOV70", "river_FOV70_REF"))
     # non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1_FOV70", "river_FOV70_woREF"))
     # Downsample factor for the dataset
@@ -99,7 +99,7 @@ class Config:
     # Number of training steps   
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, 22_000, Config.max_steps])
+    eval_steps: List[int] = field(default_factory=lambda: [500, 7_000, 15_000, 22_000, Config.max_steps])
     # eval_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, Config.max_steps])
@@ -511,14 +511,13 @@ class Runner:
         Ks: Tensor,
         width: int,
         height: int,
-        use_custom_ste: bool = True,
         n: float = 1.33, 
         plane: float = 0, 
         num_iters_newton: int = 10,   # ニュートン法の反復回数を制御
-        tol_newton: float = 1e-6,     # ニュートン法の精度
+        newtob_atol: float = 1e-6,     # ニュートン法の精度
         masks: Optional[Tensor] = None,
         flag_refraction: bool = True,
-        flag_culling: bool = True,
+        flag_culling: bool = False,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         
@@ -550,7 +549,9 @@ class Runner:
                 self.splats["quats"],
                 cam_center,
                 n,
-                plane
+                plane,
+                num_iters_newton=num_iters_newton,
+                newtob_atol=newtob_atol
             )
             
         if flag_culling:
@@ -682,36 +683,25 @@ class Runner:
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
 
             # forward (レンダリング)
-            if cfg.flag_refraction:
-                renders, alphas, info = self.refractive_rasterize_splats(
-                    camtoworlds=camtoworlds,
-                    Ks=Ks,
-                    width=width,
-                    height=height,
-                    use_custom_ste=cfg.use_custom_ste,
-                    n=cfg.n,
-                    plane=cfg.plane,
-                    num_iters_newton=cfg.num_iter_newtom,   # [TODO] i dont know what to do
-                    tol_newton=cfg.tol_newton,
-                    sh_degree=sh_degree_to_use,
-                    near_plane=cfg.near_plane,
-                    far_plane=cfg.far_plane,
-                    render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-                    masks=masks,
-                )
-            else:
-                renders, alphas, info = self.rasterize_splats(
-                    camtoworlds=camtoworlds,
-                    Ks=Ks,
-                    width=width,
-                    height=height,
-                    sh_degree=sh_degree_to_use,
-                    near_plane=cfg.near_plane,
-                    far_plane=cfg.far_plane,
-                    image_ids=image_ids,
-                    render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-                    masks=masks,
-                )                
+            renders, alphas, info = self.refractive_rasterize_splats(
+                camtoworlds=camtoworlds,
+                Ks=Ks,
+                width=width,
+                height=height,
+                use_custom_ste=cfg.use_custom_ste,
+                n=cfg.n,
+                plane=cfg.plane,
+                num_iters_newton=cfg.num_iter_newtom,   # [TODO] i dont know what to do
+                tol_newton=cfg.tol_newton,
+                sh_degree=sh_degree_to_use,
+                near_plane=cfg.near_plane,
+                far_plane=cfg.far_plane,
+                render_mode="RGB+ED" if cfg.depth_loss else "RGB",
+                masks=masks,
+                flag_refraction=cfg.flag_refraction,
+                flag_culling=cfg.flag_culling
+            )
+         
             # 深度がある場合は4ch(RGB+Depth)になるため、RGBとDで分離
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
@@ -946,7 +936,7 @@ class Runner:
                 masks=masks,
                 flag_refraction=True
             )  # [1, H, W, 3]
-            non_refractive_colors, _, _ = self.rasterize_splats(
+            non_refractive_colors, _, _ = self.refractive_rasterize_splats(
                 camtoworlds=camtoworlds,
                 Ks=Ks,
                 width=width,
