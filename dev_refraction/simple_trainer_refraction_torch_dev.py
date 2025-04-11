@@ -50,6 +50,7 @@ from gsplat.utils import save_ply
 # function to transform Gaussians location for Refraction Rasterization
 from refraction_utils_torch import culling_points_torch
 from refraction_transform import Refraction
+from gsplat.strategy.ops import remove
 
 
 ### ======== Config クラス – 設定オブジェクト ======== ###
@@ -99,7 +100,7 @@ class Config:
     # Number of training steps   
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [500, 7_000, 15_000, 22_000, Config.max_steps])
+    eval_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, 22_000, Config.max_steps])
     # eval_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, Config.max_steps])
@@ -202,14 +203,17 @@ class Config:
     use_custom_ste: bool = True
     
     num_iter_newtom: int = 8 # ニュートン法の反復回数を制御
-    tol_newton: float = 1e-3  # ニュートン法の精度
+    newton_atol: float = 1e-3  # ニュートン法の精度
     
     # Strategy
     # ADC
     prune_opa: float = 0.1
     # MCMC
     ratio_increase_new_gs: float = 1.05
-    reset_every: int = 2000
+    
+    ## Prune too big Gaussians
+    prune_start: int = 10_000
+    prune_every: int = 2_999
     prune_opa: float = 0.005
     prune_large_gs: bool = True
     prune_scale3d: float = 3.0
@@ -514,10 +518,11 @@ class Runner:
         n: float = 1.33, 
         plane: float = 0, 
         num_iters_newton: int = 10,   # ニュートン法の反復回数を制御
-        newtob_atol: float = 1e-6,     # ニュートン法の精度
+        newton_atol: float = 1e-6,     # ニュートン法の精度
         masks: Optional[Tensor] = None,
         flag_refraction: bool = True,
         flag_culling: bool = False,
+        use_custom_ste: bool = False, # [TODO] ignore refractive transform gradient
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         
@@ -550,8 +555,8 @@ class Runner:
                 cam_center,
                 n,
                 plane,
-                num_iters_newton=num_iters_newton,
-                newtob_atol=newtob_atol
+                num_iters_newton,
+                newton_atol
             )
             
         if flag_culling:
@@ -688,11 +693,10 @@ class Runner:
                 Ks=Ks,
                 width=width,
                 height=height,
-                use_custom_ste=cfg.use_custom_ste,
                 n=cfg.n,
                 plane=cfg.plane,
                 num_iters_newton=cfg.num_iter_newtom,   # [TODO] i dont know what to do
-                tol_newton=cfg.tol_newton,
+                newton_atol=cfg.newton_atol,
                 sh_degree=sh_degree_to_use,
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
@@ -870,6 +874,20 @@ class Runner:
                 )
             else:
                 assert_never(self.cfg.strategy)
+                
+            # Prune large splats
+            if step % cfg.prune_every == 0 and step > cfg.prune_start:
+                is_too_large = (
+                    torch.exp(self.splats["scales"]).max(dim=-1).values > cfg.prune_scale3d
+                )
+                num_remove = is_too_large.sum().item()
+                
+                if num_remove > 0:
+                    remove(params=self.splats, optimizers=self.optimizers, state=None, mask=is_too_large)
+                    print(f"Step {step}: {num_remove} splats are too large.")
+            
+                
+
 
             # eval the full set
             if step in [i - 1 for i in cfg.eval_steps]:
@@ -908,16 +926,14 @@ class Runner:
         )
         ellipse_time = 0
         metrics = defaultdict(list)
-        for i, data in enumerate(valloader):
-            id = data["image_id"]
-            refractive_image_path = os.path.join(cfg.refraction_dir, "train", f"{id:04d}.png")
-            non_refraction_image_path = os.path.join(cfg.non_refraction_dir, "train", f"{id:04d}.png")
-            
-            
+        
+        for i, data in enumerate(valloader):            
             camtoworlds = data["camtoworld"].to(device)
             Ks = data["K"].to(device)
+            
             pixels_val = data["image"].to(device) / 255.0
-            pixels_train = trainloader.dataset[i].data["image"].to(device) / 255.0
+            pixels_train = trainloader.dataset[i]["image"].to(device).unsqueeze(0) / 255.0
+            
             masks = data["mask"].to(device) if "mask" in data else None
             height, width = pixels_val.shape[1:3]
 
@@ -970,7 +986,7 @@ class Runner:
 
             if world_rank == 0:
                 # write images
-                canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+                canvas = canvas_list.squeeze(0).detach().cpu().numpy()
                 canvas = (canvas * 255).astype(np.uint8)
                 imageio.imwrite(
                     f"{self.render_refraction_dir}/{stage}_step{step}_{i:04d}.png",
@@ -1060,7 +1076,7 @@ class Runner:
             camtoworlds = camtoworlds_all[i : i + 1]
             Ks = K[None]
 
-            refractive_renders, _, _ = self.refractive_rasterize_splatsrasterize_splats(
+            refractive_renders, _, _ = self.refractive_rasterize_splats(
                 camtoworlds=camtoworlds,
                 Ks=Ks,
                 width=width,
@@ -1071,7 +1087,7 @@ class Runner:
                 render_mode="RGB+ED",
                 flag_refraction=True,
             )  # [1, H, W, 4]
-            non_refractive_renders, _, _ = self.rasterize_splats(
+            non_refractive_renders, _, _ = self.refractive_rasterize_splats(
                 camtoworlds=camtoworlds,
                 Ks=Ks,
                 width=width,
@@ -1204,7 +1220,7 @@ if __name__ == "__main__":
                 scale_reg=Config.scale_reg,
                 strategy=MCMCStrategy(verbose=True,
                                       ratio_increase_new_gs=Config.ratio_increase_new_gs,
-                                      reset_every=Config.reset_every,
+                                      prune_every=Config.prune_every,
                                       prune_opa=Config.prune_opa,
                                       prune_large_gs=Config.prune_large_gs,
                                       prune_scale3d=Config.prune_scale3d,

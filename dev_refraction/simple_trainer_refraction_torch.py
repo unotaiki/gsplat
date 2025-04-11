@@ -1213,7 +1213,7 @@ if __name__ == "__main__":
                 scale_reg=Config.scale_reg,
                 strategy=MCMCStrategy(verbose=True,
                                       ratio_increase_new_gs=Config.ratio_increase_new_gs,
-                                      reset_every=Config.reset_every,
+                                      prune_every=Config.reset_every,
                                       prune_opa=Config.prune_opa,
                                       prune_large_gs=Config.prune_large_gs,
                                       prune_scale3d=Config.prune_scale3d,

@@ -56,7 +56,7 @@ class MCMCStrategy(Strategy):
     
     # Our implementation
     ratio_increase_new_gs: float = 1.05
-    reset_every: int = 2000
+    prune_every: int = 2000
     
     prune_opa: float = 0.005
     prune_large_gs: bool = True
@@ -151,7 +151,7 @@ class MCMCStrategy(Strategy):
                 )
                 
             # # remove large GSs
-            # if step % self.reset_every == 0 or step == 600:
+            # if step % self.prune_every == 0 or step == 600:
             #     if self.prune_large_gs:
             #         n_prune = self._prune_gs(params, optimizers, state, step)
             #         if self.verbose:
@@ -166,6 +166,8 @@ class MCMCStrategy(Strategy):
         inject_noise_to_position(
             params=params, optimizers=optimizers, state={}, scaler=lr * self.noise_lr
         )
+            
+
 
     @torch.no_grad()
     def _relocate_gs(
@@ -212,23 +214,23 @@ class MCMCStrategy(Strategy):
 
     
 
-    # @torch.no_grad()
-    # def _prune_gs(
-    #     self,
-    #     params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
-    #     optimizers: Dict[str, torch.optim.Optimizer],
-    #     state: Dict[str, Any],
-    #     step: int,
-    # ) -> int:
+    @torch.no_grad()
+    def _prune_gs(
+        self,
+        params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
+        optimizers: Dict[str, torch.optim.Optimizer],
+        state: Dict[str, Any],
+        step: int,
+    ) -> int:
         
-    #     is_too_big = (
-    #         torch.exp(params["scales"]).max(dim=-1).values
-    #         > self.prune_scale3d 
-    #     )
+        is_too_big = (
+            torch.exp(params["scales"]).max(dim=-1).values
+            > self.prune_scale3d 
+        )
         
         
-    #     n_prune = is_too_big.sum().item()
-    #     if n_prune > 0:
-    #         remove(params=params, optimizers=optimizers, state=state, mask=is_too_big)
+        n_prune = is_too_big.sum().item()
+        if n_prune > 0:
+            remove(params=params, optimizers=optimizers, state=state, mask=is_too_big)
 
-    #     return n_prune
+        return n_prune

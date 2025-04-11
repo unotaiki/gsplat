@@ -205,9 +205,10 @@ def remove(
     # update the parameters and the state in the optimizers
     _update_param_with_optimizer(param_fn, optimizer_fn, params, optimizers)
     # update the extra running state
-    for k, v in state.items():
-        if isinstance(v, torch.Tensor):
-            state[k] = v[sel]
+    if state is not None:
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                state[k] = v[sel]
 
 
 @torch.no_grad()
