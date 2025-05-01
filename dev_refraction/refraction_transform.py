@@ -40,7 +40,41 @@ class Refraction(torch.autograd.Function):
         
         return grad_input, grad_quats, None, None, None, None, None, None
     
+
+class RefractionSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, 
+                means, 
+                quats, 
+                cam_center, 
+                n, 
+                plane, 
+                num_newton_iters=10,
+                newton_atol=1e-6
+        ):
+        device = means.device
+        
+        RT = RefractionTransform(
+            device=device,
+            means=means,
+            quats=quats,
+            cam_center=cam_center,
+            n=n,
+            plane=plane,
+            num_newton_iters=num_newton_iters,
+            newton_atol=newton_atol
+        )
+        
+        transformed_means = RT.transform_to_appearance()
+        
+        ctx.save_for_backward(transformed_means)  
+        return transformed_means, quats
     
+    @staticmethod
+    def backward(ctx, grad_means, grad_quats):
+        grad_input = grad_means.clone()  # [N, 3]
+        
+        return grad_input, grad_quats, None, None, None, None, None, None
         
             
         

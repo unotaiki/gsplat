@@ -46,6 +46,11 @@ from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat.optimizers import SelectiveAdam
 from gsplat.utils import save_ply
 
+# to open Tensorboard when running this script
+import subprocess
+import webbrowser
+
+
 ### ======== Config クラス – 設定オブジェクト ======== ###
 # Gaussian Splattingのトレーニングや評価に使うパラメータ群をまとめている設定用のデータクラス
 
@@ -62,13 +67,13 @@ class Config:
     render_traj_path: str = "ellipse"
 
     # Path to the Mip-NeRF 360 dataset
-    data_dir: str = "../data/transformers"
+    data_dir: str = "../../dataset/river2/wo_refraction"
     data_dir = os.path.abspath(data_dir)    
     # Downsample factor for the dataset
     data_factor: int = 4
     # Directory to save results
-    datetime = time.strftime("%Y%m%d-%H%M%S")
-    result_dir: str = f"results/transformers_{datetime}" 
+    datetime = time.strftime("%Y-%m%d_%H-%M")
+    result_dir: str = f"results/pose-estimator_{datetime}" 
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -91,7 +96,7 @@ class Config:
     # Number of training steps   
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [1_000, 7_000, 15_000, 22_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, 22_000, 30_000])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [30_000])
     # Whether to save ply file (storage size can be large)
@@ -143,13 +148,13 @@ class Config:
     scale_reg: float = 0.0
 
     # Enable camera optimization.
-    pose_opt: bool = False
+    pose_opt: bool = True
     # Learning rate for camera optimization
     pose_opt_lr: float = 1e-5
     # Regularization for camera optimization as weight decay
     pose_opt_reg: float = 1e-6
     # Add noise to camera extrinsics. This is only to test the camera pose optimization.
-    pose_noise: float = 0.0
+    pose_noise: float = 0.01
 
     # Enable appearance optimization. (experimental)
     app_opt: bool = False
@@ -371,25 +376,25 @@ class Runner:
         #     else:
         #         raise ValueError(f"Unknown compression strategy: {cfg.compression}")
 
-        # self.pose_optimizers = []
-        # if cfg.pose_opt:
-        #     self.pose_adjust = CameraOptModule(len(self.trainset)).to(self.device)
-        #     self.pose_adjust.zero_init()
-        #     self.pose_optimizers = [
-        #         torch.optim.Adam(
-        #             self.pose_adjust.parameters(),
-        #             lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
-        #             weight_decay=cfg.pose_opt_reg,
-        #         )
-        #     ]
-        #     if world_size > 1:
-        #         self.pose_adjust = DDP(self.pose_adjust)
+        self.pose_optimizers = []
+        if cfg.pose_opt:
+            self.pose_adjust = CameraOptModule(len(self.trainset)).to(self.device)
+            self.pose_adjust.zero_init()
+            self.pose_optimizers = [
+                torch.optim.Adam(
+                    self.pose_adjust.parameters(),
+                    lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
+                    weight_decay=cfg.pose_opt_reg,
+                )
+            ]
+            if world_size > 1:
+                self.pose_adjust = DDP(self.pose_adjust)
 
-        # if cfg.pose_noise > 0.0:
-        #     self.pose_perturb = CameraOptModule(len(self.trainset)).to(self.device)
-        #     self.pose_perturb.random_init(cfg.pose_noise)
-        #     if world_size > 1:
-        #         self.pose_perturb = DDP(self.pose_perturb)
+        if cfg.pose_noise > 0.0:
+            self.pose_perturb = CameraOptModule(len(self.trainset)).to(self.device)
+            self.pose_perturb.random_init(cfg.pose_noise)
+            if world_size > 1:
+                self.pose_perturb = DDP(self.pose_perturb)
 
         # self.app_optimizers = []
         # if cfg.app_opt:
@@ -533,13 +538,13 @@ class Runner:
             ),
         ]
         
-        # if cfg.pose_opt:
-        #     # pose optimization has a learning rate schedule
-        #     schedulers.append(
-        #         torch.optim.lr_scheduler.ExponentialLR(
-        #             self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
-        #         )
-        #     )
+        if cfg.pose_opt:
+            # pose optimization has a learning rate schedule
+            schedulers.append(
+                torch.optim.lr_scheduler.ExponentialLR(
+                    self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
+                )
+            )
         # if cfg.use_bilateral_grid:
         #     # bilateral grid has a learning rate schedule. Linear warmup for 1000 steps.
         #     schedulers.append(
@@ -606,10 +611,10 @@ class Runner:
             height, width = pixels.shape[1:3]
             
             # カメラ姿勢最適化
-            # if cfg.pose_noise:
-            #     camtoworlds = self.pose_perturb(camtoworlds, image_ids)
-            # if cfg.pose_opt:
-            #     camtoworlds = self.pose_adjust(camtoworlds, image_ids)
+            if cfg.pose_noise:
+                camtoworlds = self.pose_perturb(camtoworlds, image_ids)
+            if cfg.pose_opt:
+                camtoworlds = self.pose_adjust(camtoworlds, image_ids)
 
             # sh schedule (ステップが進むごとに徐々に SH の高次項を有効化)
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
@@ -714,20 +719,12 @@ class Runner:
             desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
             # if cfg.depth_loss:
             #     desc += f"depth loss={depthloss.item():.6f}| "
-            # if cfg.pose_opt and cfg.pose_noise:
-            #     # monitor the pose error if we inject noise
-            #     pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
-            #     desc += f"pose err={pose_err.item():.6f}| "
+            if cfg.pose_opt and cfg.pose_noise:
+                # monitor the pose error if we inject noise
+                pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
+                desc += f"pose err={pose_err.item():.6f}| "
             pbar.set_description(desc)
 
-            # write images (gt and render)
-            # if world_rank == 0 and step % 800 == 0:
-            #     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
-            #     canvas = canvas.reshape(-1, *canvas.shape[2:])
-            #     imageio.imwrite(
-            #         f"{self.render_dir}/train_rank{self.world_rank}.png",
-            #         (canvas * 255).astype(np.uint8),
-            #     )
 
             if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
                 mem = torch.cuda.max_memory_allocated() / 1024**3
@@ -736,6 +733,8 @@ class Runner:
                 self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
                 self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
                 self.writer.add_scalar("train/mem", mem, step)
+                if cfg.pose_opt:
+                    self.writer.add_scalar("train/pose_loss", pose_err.item(), step)
                 # if cfg.depth_loss:
                 #     self.writer.add_scalar("train/depthloss", depthloss.item(), step)
                 # if cfg.use_bilateral_grid:
@@ -761,11 +760,11 @@ class Runner:
                 ) as f:
                     json.dump(stats, f)
                 data = {"step": step, "splats": self.splats.state_dict()}
-                # if cfg.pose_opt:
-                #     if world_size > 1:
-                #         data["pose_adjust"] = self.pose_adjust.module.state_dict()
-                #     else:
-                #         data["pose_adjust"] = self.pose_adjust.state_dict()
+                if cfg.pose_opt:
+                    if world_size > 1:
+                        data["pose_adjust"] = self.pose_adjust.module.state_dict()
+                    else:
+                        data["pose_adjust"] = self.pose_adjust.state_dict()
                 # if cfg.app_opt:
                 #     if world_size > 1:
                 #         data["app_module"] = self.app_module.module.state_dict()
@@ -828,9 +827,9 @@ class Runner:
                 else:
                     optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-            # for optimizer in self.pose_optimizers:
-            #     optimizer.step()
-            #     optimizer.zero_grad(set_to_none=True)
+            for optimizer in self.pose_optimizers:
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
             # for optimizer in self.app_optimizers:
             #     optimizer.step()
             #     optimizer.zero_grad(set_to_none=True)
@@ -1156,5 +1155,15 @@ if __name__ == "__main__":
                 "torchpq (instruction at https://github.com/DeMoriarty/TorchPQ?tab=readme-ov-file#install) "
                 "and plas (via 'pip install git+https://github.com/fraunhoferhhi/PLAS.git') "
             )
+            
+    # Open Tensorboard
+
+    tb_log_dir = os.path.join(cfg.result_dir, "tb")
+    tb_port = 6006
+    subprocess.Popen(
+        ["tensorboard", "--logdir", tb_log_dir, "--port", str(tb_port)]
+    )
+    time.sleep(5)
+    webbrowser.open(f"http://localhost:{tb_port}")
 
     cli(main, cfg, verbose=True)

@@ -194,13 +194,14 @@ class Config:
     num_init_points: int = 1e4
     
     # Refraction
-    flag_refraction: bool = True
-    flag_culling: bool = True
-    use_custom_ste: bool = True
+    flag_refraction: bool = False
+    flag_culling: bool = False
+    flag_apply_dpdp: bool = False
     n: float = 1.33 # refractive index
     plane: float = 0.0 # refractive plane (to z axis)
     atol: float = 1e-8 # tolerance for refraction calculation
     init_depth: float = -20.0
+    use_custom_ste: bool = False
     
     num_iter_newtom: int = 8 # ニュートン法の反復回数を制御
     newton_atol: float = 1e-3  # ニュートン法の精度
@@ -375,7 +376,7 @@ class Runner:
         
         # Training Data Set, Refracted Images
         self.parser = Parser(
-            data_dir=cfg.refraction_dir if cfg.flag_refraction else cfg.non_refraction_dir,
+            data_dir=cfg.refraction_dir,
         )
         self.trainset = Dataset(
             self.parser,
@@ -385,7 +386,7 @@ class Runner:
         )
         # Validation Data Set, Non-refracted Images
         self.parser_val = Parser(
-            data_dir=cfg.non_refraction_dir if cfg.flag_refraction else cfg.refraction_dir,
+            data_dir=cfg.non_refraction_dir,
         )
         self.valset = Dataset(self.parser_val, split="train")  # TODO : Do i need validation set?
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
