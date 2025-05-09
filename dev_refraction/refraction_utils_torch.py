@@ -1,3 +1,28 @@
+# this code has alot of Errors
+# you have to use and reffer to the refraction_trabnsform.py
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import torch
 from internal.utils.gaussian_utils import GaussianTransformUtils
 
@@ -11,7 +36,7 @@ def newton_solve_quartic_torch(r: torch.Tensor, h: torch.Tensor, H: float, n: fl
     4次方程式は次の係数で表される:
       a4 = 1 - n^2  
       a3 = 2*(n^2 - 1)*r  
-      a2 = (1 - n^2)*(h^2 + r^2)  
+      a2 = (1 - n2)*r2 + h2 - n2 * H2 
       a1 = 2*n^2*r*H^2  
       a0 = - n^2 * H^2 * r^2  
     """
