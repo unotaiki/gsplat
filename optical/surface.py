@@ -79,21 +79,23 @@ class WaterSruface(torch.autograd.Function):
         # compute intersection point
         self.xs = self.x0 + self.s * torch.cos(self.phi)
         self.ys = self.y0 + self.s * torch.sin(self.phi)
-        self.intersection = torch.stack([self.xs, self.ys, self.plane], dim=1)
+        plane_vec = torch.full_like(self.xs, (self.plane - self.H), device=self.device, dtype=self.xs.dtype)
+        self.intersection = torch.stack([self.xs, self.ys, plane_vec], dim=1)
         
         # compute Ray direction from camera center to intersection point
         # this means the direction from camera center to the apparent position of the Gaussian
         self.ray_to_apparent = torch.stack(
             [self.xs - self.x0, 
              self.ys - self.y0, 
-             self.plane - self.H], dim=1
+             plane_vec], dim=1
         )
         self.ray_to_apparent = self.ray_to_apparent / torch.norm(self.ray_to_apparent, dim=1, keepdim=True).clamp(min=1e-8)
         
         # compute Ray direction from intersection point to real Gaussian center
         self.ray_intersec2gaussian = torch.stack(
-            self.means - self.intersection,
-            dim=1
+            [self.x - self.xs, 
+             self.y - self.ys, 
+             self.z - plane_vec], dim=1
         )
         self.ray_intersec2gaussian = self.ray_intersec2gaussian / torch.norm(self.ray_intersec2gaussian, dim=1, keepdim=True).clamp(min=1e-8)
         
@@ -138,5 +140,6 @@ class WaterSruface(torch.autograd.Function):
     def calc_apparent_quaternion(self,
     ):
         d_q = quat_from_2dirs(self.ray_intersec2gaussian, self.ray_to_apparent)
+        # d_q = quat_from_2dirs(self.ray_to_apparent, self.ray_intersec2gaussian) 
         new_quats = GaussianTransformUtils.quat_multiply(self.quats, d_q)
         return new_quats
