@@ -7,11 +7,12 @@ from internal.utils.gaussian_utils import GaussianTransformUtils
 from optical.utils.rotation_utils import quat_from_2dirs
 
 
-class WaterSruface(torch.autograd.Function):
+class WaterSruface():
     def __init__(self, 
                  device: str = "cuda",
                  means: torch.Tensor = None,
                  quats: torch.Tensor = None,
+                 scales: torch.Tensor = None,
                  cam_center: torch.Tensor = None, 
                  n: torch.Tensor = 1.33, 
                  plane: torch.Tensor = 0,
@@ -22,11 +23,15 @@ class WaterSruface(torch.autograd.Function):
         self.device = device
         self.flag_solve_quartic_by_newton = flag_solve_quartic_by_newton
         
-        self.x0, self.y0, self.H = cam_center[0], cam_center[1], cam_center[2]
+        self.x0 = cam_center[0]
+        self.y0 = cam_center[1]
+        self.H = cam_center[2] - self.plane
         
         self.means = means
         self.quats = quats
+        self.scales = scales
         self.num_g = means.shape[0]
+        
         self.x = means[:, 0] - self.x0
         self.y = means[:, 1] - self.y0
         self.z = means[:, 2] - self.plane
@@ -77,27 +82,26 @@ class WaterSruface(torch.autograd.Function):
         self.s2 = self.s ** 2
         
         # compute intersection point
-        self.xs = self.x0 + self.s * torch.cos(self.phi)
-        self.ys = self.y0 + self.s * torch.sin(self.phi)
-        plane_vec = torch.full_like(self.xs, (self.plane - self.H), device=self.device, dtype=self.xs.dtype)
-        self.intersection = torch.stack([self.xs, self.ys, plane_vec], dim=1)
+        self.xs = self.s * torch.cos(self.phi)
+        self.ys = self.s * torch.sin(self.phi)
+        mH_vec = torch.full_like(self.xs, -self.H, device=self.device, dtype=self.xs.dtype)
         
         # compute Ray direction from camera center to intersection point
         # this means the direction from camera center to the apparent position of the Gaussian
-        self.ray_to_apparent = torch.stack(
-            [self.xs - self.x0, 
-             self.ys - self.y0, 
-             plane_vec], dim=1
+        self.ray_cam2intersec = torch.stack(
+            [self.xs, 
+             self.ys, 
+             mH_vec], dim=1
         )
-        self.ray_to_apparent = self.ray_to_apparent / torch.norm(self.ray_to_apparent, dim=1, keepdim=True).clamp(min=1e-8)
+        self.unit_dir_to_apparent = self.ray_cam2intersec / torch.norm(self.ray_cam2intersec, dim=1, keepdim=True).clamp(min=1e-8)
         
         # compute Ray direction from intersection point to real Gaussian center
         self.ray_intersec2gaussian = torch.stack(
             [self.x - self.xs, 
              self.y - self.ys, 
-             self.z - plane_vec], dim=1
+             self.z], dim=1
         )
-        self.ray_intersec2gaussian = self.ray_intersec2gaussian / torch.norm(self.ray_intersec2gaussian, dim=1, keepdim=True).clamp(min=1e-8)
+        self.unit_dir_intersec2gaussian = self.ray_intersec2gaussian / torch.norm(self.ray_intersec2gaussian, dim=1, keepdim=True).clamp(min=1e-8)
         
     def calc_theta(self,
     ):
@@ -105,7 +109,17 @@ class WaterSruface(torch.autograd.Function):
         self.theta1 = torch.atan((self.r - self.s) / (-self.z))
         self.d_theta = self.theta0 - self.theta1
         
+    def calc_ray_length(self,
+    ):
+        self.len_cam2intersec = torch.norm(self.ray_cam2intersec, dim=1)
+        self.len_intersec2gaussian = torch.norm(self.ray_intersec2gaussian, dim=1)
         
+        self.ray_intersec2apparent = torch.stack(
+            [self.x_app - self.xs, 
+             self.y_app - self.ys, 
+             self.z_app ], dim=1
+        )
+        self.len_intersec2apparent = torch.norm(self.ray_intersec2apparent, dim=1)
 
     ### ------------------------------
     ###        Calcurate apparent position of Gaussian centers
@@ -114,7 +128,7 @@ class WaterSruface(torch.autograd.Function):
     ):
         self.offset_r =  self.n2m1 * self.z * (torch.tan(self.theta1)**3)    
         self.ra = self.r + self.offset_r
-        self.za = 1/self.n * self.z * (torch.cos(self.theta0) / torch.cos(self.theta1))**3 
+        self.z_app = 1/self.n * self.z * (torch.cos(self.theta0) / torch.cos(self.theta1))**3 
             
     
     def transform_to_appearance(self,
@@ -123,10 +137,14 @@ class WaterSruface(torch.autograd.Function):
         self.calc_theta()
         self.calc_appearance_position()
         
-        # 見かけの位置に座標変換
-        new_x = self.x0 + self.ra * torch.cos(self.phi)
-        new_y = self.y0 + self.ra * torch.sin(self.phi)
-        new_z = self.plane + self.za
+        # 相対座標
+        self.x_app = self.ra * torch.cos(self.phi)
+        self.y_app = self.ra * torch.sin(self.phi)
+    
+        # 見かけの位置に座標変換 (絶対座標)
+        new_x = self.x0 + self.x_app    
+        new_y = self.y0 + self.y_app    
+        new_z = self.plane + self.z_app
         
         self.new_means = torch.stack([new_x, new_y, new_z], dim=1)
         self.new_quats = self.calc_apparent_quaternion()
@@ -139,7 +157,21 @@ class WaterSruface(torch.autograd.Function):
     ### ------------------------------
     def calc_apparent_quaternion(self,
     ):
-        d_q = quat_from_2dirs(self.ray_intersec2gaussian, self.ray_to_apparent)
-        # d_q = quat_from_2dirs(self.ray_to_apparent, self.ray_intersec2gaussian) 
+        d_q = quat_from_2dirs(self.unit_dir_intersec2gaussian, self.unit_dir_to_apparent) 
         new_quats = GaussianTransformUtils.quat_multiply(self.quats, d_q)
         return new_quats
+    
+    ### ------------------------------
+    ###        Calcurate SCALE corrected by quaternion
+    ### ------------------------------
+    
+    def scale_correction(self,
+    ):
+        # Ensure ray lengths have been computed
+        if getattr(self, 'len_cam2intersec', None) is None:
+            self.calc_ray_length()
+        self.scale_correction_factor = (self.len_cam2intersec + self.len_intersec2apparent) / (self.len_cam2intersec + self.len_intersec2gaussian).clamp(min=1e-4)
+        self.new_scales = torch.log(self.scales) * self.scales 
+        return self.new_scales
+    
+    

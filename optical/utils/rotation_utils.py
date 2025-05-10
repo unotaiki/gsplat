@@ -50,8 +50,8 @@ def quat_from_2dirs(
     
     if flag_need_normalize:
         # ベクトルを正規化
-        a = a.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-        b = b.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        a = a / a.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        b = b / b.norm(dim=-1, keepdim=True).clamp(min=1e-8)
 
     # compute cross product and dot product
     cross = torch.cross(a, b, dim=-1)
@@ -63,3 +63,30 @@ def quat_from_2dirs(
     q = torch.cat([w, xyz], dim=-1)
     
     return q / q.norm(dim=-1, keepdim=True) 
+
+
+def quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
+    """
+    クォータニオン q = [w, x, y, z] から 3x3 回転行列を返す（PyTorch版）。
+
+    Args:
+        q: shape (..., 4) のテンソル。最後の次元が [w, x, y, z]
+
+    Returns:
+        R: shape (..., 3, 3) の回転行列テンソル
+    """
+    # 正規化
+    q = q / q.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+    w, x, y, z = q.unbind(dim=-1)
+
+    ww = w*w; xx = x*x; yy = y*y; zz = z*z
+    wx = w*x; wy = w*y; wz = w*z
+    xy = x*y; xz = x*z; yz = y*z
+
+    # バッチ対応でスタック
+    row0 = torch.stack([ww + xx - yy - zz, 2*(xy - wz),     2*(xz + wy)], dim=-1)
+    row1 = torch.stack([2*(xy + wz),       ww - xx + yy - zz, 2*(yz - wx)], dim=-1)
+    row2 = torch.stack([2*(xz - wy),       2*(yz + wx),       ww - xx - yy + zz], dim=-1)
+
+    R = torch.stack([row0, row1, row2], dim=-2)
+    return R

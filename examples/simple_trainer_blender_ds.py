@@ -148,13 +148,13 @@ class Config:
     scale_reg: float = 0.0
 
     # Enable camera optimization.
-    pose_opt: bool = True
+    pose_opt: bool = False
     # Learning rate for camera optimization
     pose_opt_lr: float = 1e-5
     # Regularization for camera optimization as weight decay
     pose_opt_reg: float = 1e-6
     # Add noise to camera extrinsics. This is only to test the camera pose optimization.
-    pose_noise: float = 0.01
+    pose_noise: float = 0.00 # 0.01
 
     # Enable appearance optimization. (experimental)
     app_opt: bool = False
