@@ -13,6 +13,7 @@ class WaterSurface():
                  means: torch.Tensor = None,
                  quats: torch.Tensor = None,
                  scales: torch.Tensor = None,
+                 opacities: torch.Tensor = None,
                  cam_center: torch.Tensor = None, 
                  n: torch.Tensor = 1.33, 
                  plane: torch.Tensor = 0,
@@ -35,6 +36,7 @@ class WaterSurface():
         self.means = means
         self.quats = quats
         self.scales = scales
+        self.opacities = opacities
         self.num_g = means.shape[0]
         
         self.x = means[:, 0] - self.x0
@@ -179,4 +181,16 @@ class WaterSurface():
         self.new_scales = logK * self.scales 
         return self.new_scales
     
-    
+    ### ------------------------------
+    ###        Calcurate OPACITY corrected by quaternion
+    ### ------------------------------
+    def opacity_correction(self,
+    ):
+        # Ensure scale correction factor have been computed
+        if getattr(self, 'scale_correction_factor', None) is None:
+            self.scale_correction()
+        volume_ratio = self.scale_correction_factor ** 3
+        opacities_abs = torch.sigmoid(self.opacities) # parameter -> real opacity
+        new_opacities_abs = (opacities_abs / volume_ratio).clamp(min=1e-4, max=1-1e-4) # (N,)
+        self.new_opacities = torch.logit(new_opacities_abs)
+        return self.new_opacities
