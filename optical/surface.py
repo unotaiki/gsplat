@@ -7,7 +7,7 @@ from internal.utils.gaussian_utils import GaussianTransformUtils
 from optical.utils.rotation_utils import quat_from_2dirs
 
 
-class WaterSruface():
+class WaterSurface():
     def __init__(self, 
                  device: str = "cuda",
                  means: torch.Tensor = None,
@@ -173,8 +173,10 @@ class WaterSruface():
         # Ensure ray lengths have been computed
         if getattr(self, 'len_cam2intersec', None) is None:
             self.calc_ray_length()
-        self.scale_correction_factor = (self.len_cam2intersec + self.len_intersec2apparent) / (self.len_cam2intersec + self.len_intersec2gaussian).clamp(min=1e-4)
-        self.new_scales = torch.log(self.scales) * self.scales 
+        self.scale_correction_factor = \
+            (self.len_cam2intersec + self.len_intersec2apparent) / (self.len_cam2intersec + self.len_intersec2gaussian).clamp(min=1e-4) # (N,)
+        logK = torch.log(self.scale_correction_factor).unsqueeze(-1) # (N, 1)
+        self.new_scales = logK * self.scales 
         return self.new_scales
     
     
