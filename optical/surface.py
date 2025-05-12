@@ -178,7 +178,7 @@ class WaterSurface():
         self.scale_correction_factor = \
             (self.len_cam2intersec + self.len_intersec2apparent) / (self.len_cam2intersec + self.len_intersec2gaussian).clamp(min=1e-4) # (N,)
         logK = torch.log(self.scale_correction_factor).unsqueeze(-1) # (N, 1)
-        self.new_scales = logK * self.scales 
+        self.new_scales = logK + self.scales 
         return self.new_scales
     
     ### ------------------------------
@@ -189,7 +189,7 @@ class WaterSurface():
         # Ensure scale correction factor have been computed
         if getattr(self, 'scale_correction_factor', None) is None:
             self.scale_correction()
-        volume_ratio = self.scale_correction_factor ** 3
+        volume_ratio = self.scale_correction_factor 
         opacities_abs = torch.sigmoid(self.opacities) # parameter -> real opacity
         new_opacities_abs = (opacities_abs / volume_ratio).clamp(min=1e-4, max=1-1e-4) # (N,)
         self.new_opacities = torch.logit(new_opacities_abs)
