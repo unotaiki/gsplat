@@ -17,11 +17,16 @@ class WaterSruface():
                  n: torch.Tensor = 1.33, 
                  plane: torch.Tensor = 0,
                  flag_solve_quartic_by_newton: bool = True,
+                 newton_iters: int = 10,
+                 newton_tol: float = 1e-6
+                 
     ):
         self.n = torch.tensor(n, dtype=torch.float32, device=device, requires_grad=False)
         self.plane = torch.tensor(plane, dtype=torch.float32, device=device, requires_grad=False)
         self.device = device
         self.flag_solve_quartic_by_newton = flag_solve_quartic_by_newton
+        self.newton_iters = newton_iters
+        self.newton_tol = newton_tol
         
         self.x0 = cam_center[0]
         self.y0 = cam_center[1]
@@ -62,12 +67,10 @@ class WaterSruface():
         return a4, a3, a2, a1, a0
 
     def calc_intersection(self,
-        num_iters: int = 10,
-        tol: float = 1e-2
     ):
         a4, a3, a2, a1, a0 = self.calculate_quartic_terms()  
         if self.flag_solve_quartic_by_newton:
-            self.s = solve_quartic_newton(a4, a3, a2, a1, a0, self.r, num_iters=num_iters, tol=tol)
+            self.s = solve_quartic_newton(a4, a3, a2, a1, a0, self.r, num_iters=self.newton_iters, tol=self.newton_tol)
         else:
             s = solve_quartic_ferrari(a4, a3, a2, a1, a0)
             # s is like roots = torch.stack([r1 - z0, r2 - z0, r3 - z0, r4 - z0], dim=-1) of dtype = torch.complex128
