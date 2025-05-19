@@ -6,7 +6,7 @@ from mine.loader import initialize_model_from_ply_file
 home_dir = os.path.expanduser("~")
 device = torch.device("cuda:0")
 
-class Dataset:
+class LoadDataset:
     def __init__(self, 
         wo_ref_dataset_path: str=os.path.abspath(os.path.join(home_dir, "dataset/river2/wo_refraction")),
         w_ref_dataset_path: str=os.path.abspath(os.path.join(home_dir, "dataset/river2/refraction")),
@@ -24,11 +24,11 @@ class Dataset:
         
         # Load training 3DGS model
         self.model = self.load_trained_model(self.wo_ref_model_path)
-        self.means     = self.gaussians["means"] 
-        self.scales    = self.gaussians["scales"]
-        self.quats     = self.gaussians["quats"]    
-        self.opacities = self.gaussians["opacities"].squeeze(-1)
-        self.colors    = self.gaussians["shs"]
+        self.means     = self.model.gaussians["means"] 
+        self.scales    = self.model.gaussians["scales"]
+        self.quats     = self.model.gaussians["rotations"]    
+        self.opacities = self.model.gaussians["opacities"].squeeze(-1)
+        self.colors    = self.model.gaussians["shs"]
         
     # Load the dataset
     def load_dataset(self,
@@ -50,8 +50,9 @@ class Dataset:
         return dataloader
         
     # Load trained 3DGS model
-    def load_trained_model(model_path):
-        model = initialize_model_from_ply_file(model_path)
+    def load_trained_model(self,
+                           model_path):
+        model = initialize_model_from_ply_file(model_path, device=device)
         return model
     
     def set_iamge(self,
@@ -62,7 +63,7 @@ class Dataset:
         self.camtoworld = self.data_wo["camtoworld"].view(1,4,4).to(device)
         self.worldtocam = self.camtoworld.inverse()
         self.cam_center = self.camtoworld[0, :3, 3].detach().clone()
-        self.Ks = self.data_wo["K"].view(1,3,3).to(device)
+        self.K = self.data_wo["K"].view(1,3,3).to(device)
         self.image_id = self.data_wo["image_id"]
         
         self.pixels_wo = self.data_wo["image"].unsqueeze(0).to(device) / 255.0
@@ -72,5 +73,9 @@ class Dataset:
         self.image_path_wo = os.path.join(self.wo_ref_dataset_path, "train", f"{self.image_id:04d}" +  ".png")
         self.image_path_w = os.path.join(self.w_ref_dataset_path, "train", f"{self.image_id:04d}" +  ".png")
         
-        
+    def get_model_param(self):
+        return self.means, self.scales, self.quats, self.opacities, self.colors
+    
+    def get_camera_param(self):
+        return self.pixels_wo, self.pixels_w, self.camtoworld, self.worldtocam, self.cam_center, self.K, self.height, self.width, self.image_id
     
