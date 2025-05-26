@@ -1,7 +1,12 @@
 import os
+import sys
+import itertools
+import numpy as np
 import torch
-from examples.datasets.blender_nerf_synthetic import Parser, Dataset
+import matplotlib.pyplot as plt
+from gsplat import rasterization
 from mine.loader import initialize_model_from_ply_file
+from examples.datasets.blender_nerf_synthetic import Parser, Dataset
 
 home_dir = os.path.expanduser("~")
 device = torch.device("cuda:0")
@@ -79,3 +84,83 @@ class LoadDataset:
     def get_camera_param(self):
         return self.pixels_wo, self.pixels_w, self.camtoworld, self.worldtocam, self.cam_center, self.K, self.height, self.width, self.image_id
     
+    
+
+def combert_into_colormap(x, colormap="viridis", device=device):
+    """
+    Convert a tensor of shape (N, ) with values in [0, 1] to a colormap (N, 3) RGB
+    colormap is a string, e.g. "viridis", "plasma", "inferno", etc.
+    """
+    colors = plt.get_cmap("viridis")(x.detach().cpu().numpy())[:, :3]  # remove alpha channel
+    colors = torch.from_numpy(colors).to(device)
+    # convert to float32
+    colors = colors.float()
+    return colors.unsqueeze(1)  # shape (N, 1, 3), type: float32
+
+def compare_rasterization_variants(
+    base_data: dict,
+    transformed_data: dict,
+    opacities,
+    colors,
+    worldtocam,
+    Ks,
+    width,
+    height,
+    rasterization_fn=rasterization,
+    comparison_keys=("means", "quats", "scales"),
+    titles=("M", "Q", "S"),
+    transformed_titles=("tM", "tQ", "tS"),
+    rasterize_mode="antialiased"
+):
+    """
+    Compare all 2^N combinations of using base vs transformed data.
+    
+    Args:
+        rasterization_fn: Function for rasterization (returns RGB image).
+        base_data: dict with keys like "means", "quats", "scales" (untransformed).
+        transformed_data: dict with same keys but transformed values.
+        opacities, colors, worldtocam, Ks, width, height: rendering params.
+        comparison_keys: Which data keys to vary (default = means, quats, scales).
+        titles: Short name for original key (default = M, Q, S).
+        transformed_titles: Short name for transformed version.
+        rasterize_mode: Rasterization mode (default: "antialiased").
+    """
+    num_variants = 2 ** len(comparison_keys)
+    fig_cols = min(num_variants, 4)
+    fig_rows = (num_variants + fig_cols - 1) // fig_cols
+    fig, axes = plt.subplots(fig_rows, fig_cols, figsize=(5 * fig_cols, 5 * fig_rows))
+    axes = axes.flatten()
+
+    combinations = list(itertools.product([False, True], repeat=len(comparison_keys)))
+
+    for idx, use_transformed in enumerate(combinations):
+        data_inputs = {
+            key: (transformed_data[key] if use_t else base_data[key])
+            for key, use_t in zip(comparison_keys, use_transformed)
+        }
+
+        rgb, _, _ = rasterization_fn(
+            data_inputs["means"],
+            data_inputs["quats"],
+            data_inputs["scales"],
+            opacities, colors,
+            worldtocam, Ks,
+            width, height,
+            sh_degree=0,
+            rasterize_mode=rasterize_mode
+        )
+        img = rgb.squeeze().detach().cpu().numpy()
+
+        title_parts = [
+            (transformed_titles[i] if use_t else titles[i])
+            for i, use_t in enumerate(use_transformed)
+        ]
+        axes[idx].imshow(img)
+        axes[idx].set_title(" ".join(title_parts))
+        axes[idx].axis("off")
+
+    for i in range(len(combinations), len(axes)):
+        axes[i].axis("off")
+
+    plt.tight_layout()
+    plt.show()

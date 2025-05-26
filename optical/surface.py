@@ -19,7 +19,8 @@ class WaterSurface():
                  plane: torch.Tensor = 0,
                  flag_solve_quartic_by_newton: bool = True,
                  newton_iters: int = 10,
-                 newton_tol: float = 1e-6
+                 newton_tol: float = 1e-6,
+                 numercial_jacobians_delta: float = 1e-4,
                  
     ):
         self.n = torch.tensor(n, dtype=torch.float32, device=device, requires_grad=False)
@@ -28,10 +29,12 @@ class WaterSurface():
         self.flag_solve_quartic_by_newton = flag_solve_quartic_by_newton
         self.newton_iters = newton_iters
         self.newton_tol = newton_tol
+        self.numerical_jacobians_delta = numercial_jacobians_delta
         
-        self.x0 = cam_center[0]
-        self.y0 = cam_center[1]
-        self.H = cam_center[2] - self.plane
+        self.cam_center = cam_center
+        self.x0 = self.cam_center[0]
+        self.y0 = self.cam_center[1]
+        self.H = self.cam_center[2] - self.plane
         
         self.means = means
         self.quats = quats
@@ -167,30 +170,120 @@ class WaterSurface():
         return new_quats
     
     ### ------------------------------
+    ###        Calcurate Jacobian of refractive transformation
+    ### ------------------------------    
+    def dPa_dP(self,
+    ):
+        self.jacobian = torch.zeros((self.num_g, 3, 3), device=self.device, dtype=self.x.dtype)
+        for i in range(3):
+            delta = torch.zeros((self.num_g, 3), device=self.device, dtype=self.x.dtype)
+            delta[:, i] = self.numerical_jacobians_delta
+            means_plus = self.means + delta
+            means_minus = self.means - delta
+            WS_plus = WaterSurface(
+                means=means_plus,
+                quats=self.quats,
+                scales=self.scales,
+                opacities=self.opacities,
+                cam_center=self.cam_center,
+                n=self.n,
+                plane=self.plane,
+                flag_solve_quartic_by_newton=self.flag_solve_quartic_by_newton,
+                newton_iters=self.newton_iters,
+                newton_tol=self.newton_tol,
+                numercial_jacobians_delta=self.numerical_jacobians_delta
+            )
+            WS_minus = WaterSurface(
+                means=means_minus,
+                quats=self.quats,
+                scales=self.scales,
+                opacities=self.opacities,
+                cam_center=self.cam_center,
+                n=self.n,
+                plane=self.plane,
+                flag_solve_quartic_by_newton=self.flag_solve_quartic_by_newton,
+                newton_iters=self.newton_iters,
+                newton_tol=self.newton_tol,
+                numercial_jacobians_delta=self.numerical_jacobians_delta
+            )
+            t_means_plus, _ = WS_plus.transform_to_appearance()
+            t_means_minus, _ = WS_minus.transform_to_appearance()
+            self.jacobian[:, :, i] = (t_means_plus - t_means_minus) / (2 * self.numerical_jacobians_delta)
+            
+        return self.jacobian
+    
+    def calc_spatial_compression(self,
+    ):
+        """
+        ヤコビアンを構成する3つのベクトルで構成される六面体の体積
+        """
+        # Ensure spatial compression have been computed
+        if getattr(self, 'jacobian', None) is None:
+            _ = self.dPa_dP()        
+        d_xa = self.jacobian[:, 0, :]
+        d_ya = self.jacobian[:, 1, :]
+        d_za = self.jacobian[:, 2, :]
+        
+        cross_xy = torch.cross(d_xa, d_ya, dim=1)
+        self.volume_compression_ratio = torch.abs(torch.sum(d_za * cross_xy, dim=1)) # (N,)    
+        
+        
+    ### ------------------------------
     ###        Calcurate SCALE corrected by quaternion
     ### ------------------------------
     
-    def scale_correction(self,
+    def scale_correction_as_log(self,
     ):
-        # Ensure ray lengths have been computed
-        if getattr(self, 'len_cam2intersec', None) is None:
-            self.calc_ray_length()
-        self.scale_correction_factor = \
-            (self.len_cam2intersec + self.len_intersec2apparent) / (self.len_cam2intersec + self.len_intersec2gaussian).clamp(min=1e-4) # (N,)
+        # Ensure spatial compression have been computed
+        if getattr(self, 'jacobian', None) is None:
+            _ = self.dPa_dP()
+        if getattr(self, 'volume_compression_ratio', None) is None:
+            self.calc_spatial_compression()
+        
+        # calculate scale correction factor from volume compression rario
+        self.scale_correction_factor = self.volume_compression_ratio**(1/3) # (N,)
         logK = torch.log(self.scale_correction_factor).unsqueeze(-1) # (N, 1)
         self.new_scales = logK + self.scales 
         return self.new_scales
     
-    ### ------------------------------
-    ###        Calcurate OPACITY corrected by quaternion
-    ### ------------------------------
-    def opacity_correction(self,
+    def scale_correction_as_real(self,
     ):
-        # Ensure scale correction factor have been computed
-        if getattr(self, 'scale_correction_factor', None) is None:
-            self.scale_correction()
-        volume_ratio = self.scale_correction_factor 
-        opacities_abs = torch.sigmoid(self.opacities) # parameter -> real opacity
-        new_opacities_abs = (opacities_abs / volume_ratio).clamp(min=1e-4, max=1-1e-4) # (N,)
-        self.new_opacities = torch.logit(new_opacities_abs)
-        return self.new_opacities
+        # Ensure spatial compression have been computed
+        if getattr(self, 'jacobian', None) is None:
+            _ = self.dPa_dP()
+        if getattr(self, 'volume_compression_ratio', None) is None:
+            self.calc_spatial_compression()
+        
+        # calculate scale correction factor from volume compression rario
+        self.scale_correction_factor = self.volume_compression_ratio**(1/3) # (N,)
+        # self.scale_correction_factor = self.volume_compression_ratio**1 # (N,)
+        K = self.scale_correction_factor.unsqueeze(-1) # (N, 1)
+        self.new_scales = K * self.scales 
+        return self.new_scales
+    
+    
+    # def scale_correction(self,
+    # ):
+    #     # Ensure ray lengths have been computed
+    #     if getattr(self, 'len_cam2intersec', None) is None:
+    #         self.calc_ray_length()
+    #     self.scale_correction_factor = \
+    #         (self.len_cam2intersec + self.len_intersec2apparent) / (self.len_cam2intersec + self.len_intersec2gaussian).clamp(min=1e-4) # (N,)
+    #     logK = torch.log(self.scale_correction_factor).unsqueeze(-1) # (N, 1)
+    #     self.new_scales = logK + self.scales 
+    #     return self.new_scales
+        
+    
+    # ### ------------------------------
+    # ###        Calcurate OPACITY corrected by quaternion
+    # ### ------------------------------
+    # def opacity_correction(self,
+    # ):
+    #     # Ensure scale correction factor have been computed
+    #     if getattr(self, 'scale_correction_factor', None) is None:
+    #         self.scale_correction()
+    #     volume_ratio = self.scale_correction_factor 
+    #     opacities_abs = torch.sigmoid(self.opacities) # parameter -> real opacity
+    #     new_opacities_abs = (opacities_abs / volume_ratio).clamp(min=1e-4, max=1-1e-4) # (N,)
+    #     self.new_opacities = torch.logit(new_opacities_abs)
+    #     return self.new_opacities
