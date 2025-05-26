@@ -6,6 +6,10 @@ from optical.quartic_solver.newton_method import solve_quartic_newton
 from internal.utils.gaussian_utils import GaussianTransformUtils
 from optical.utils.rotation_utils import quat_from_2dirs
 
+# environment map
+import imageio
+import numpy as np
+import torch.nn.functional as F
 
 class WaterSurface():
     def __init__(self, 
@@ -14,7 +18,13 @@ class WaterSurface():
                  quats: torch.Tensor = None,
                  scales: torch.Tensor = None,
                  opacities: torch.Tensor = None,
-                 cam_center: torch.Tensor = None, 
+                 
+                 camtoworld: torch.Tensor = None, # (4, 4) matrix
+                 cam_center: torch.Tensor = None,
+                 K: torch.Tensor = None, # (3, 3) matrix
+                 width: int = None,
+                 height: int = None, 
+                 
                  n: torch.Tensor = 1.33, 
                  plane: torch.Tensor = 0,
                  flag_solve_quartic_by_newton: bool = True,
@@ -31,7 +41,12 @@ class WaterSurface():
         self.newton_tol = newton_tol
         self.numerical_jacobians_delta = numercial_jacobians_delta
         
-        self.cam_center = cam_center
+        self.camtoworld = camtoworld
+        self.cam_center = self.camtoworld[:3, 3] if camtoworld is not None else cam_center
+        self.K = K
+        self.width = width
+        self.height = height
+        
         self.x0 = self.cam_center[0]
         self.y0 = self.cam_center[1]
         self.H = self.cam_center[2] - self.plane
@@ -261,7 +276,7 @@ class WaterSurface():
         self.new_scales = K * self.scales 
         return self.new_scales
     
-    
+    # Rayの距離による補間 ← 3D空間が歪むことが原因のため、不適
     # def scale_correction(self,
     # ):
     #     # Ensure ray lengths have been computed
@@ -287,3 +302,119 @@ class WaterSurface():
     #     new_opacities_abs = (opacities_abs / volume_ratio).clamp(min=1e-4, max=1-1e-4) # (N,)
     #     self.new_opacities = torch.logit(new_opacities_abs)
     #     return self.new_opacities
+    
+    ### -----------------------------------
+    ###        Calcurate ray of each pixel
+    ### -----------------------------------
+    def calc_ray_of_each_pixel(self, 
+    ):
+        
+        fx, fy = self.K[0, 0], self.K[1, 1]
+        cx, cy = self.K[0, 2], self.K[1, 2]
+    
+        # (H, W) indexing
+        v, u = torch.meshgrid(
+            torch.arange(0, self.height, device=self.device),
+            torch.arange(0, self.width, device=self.device),
+            indexing='ij'
+        )
+    
+        self.rays = torch.stack([
+            (u - cx) / fx,
+            -(v - cy) / fy,
+            torch.ones_like(u) 
+        ], dim=-1)  # (H, W, 3)
+    
+        # Rotate ray directions to world coordinates
+        self.rays = torch.einsum('ij,hwj->hwi', self.camtoworld[:3, :3], self.rays) # (3, 3) @ (H, W, 3) -> (H, W, 3)
+        self.rays = self.rays / torch.norm(self.rays, dim=-1, keepdim=True)
+    
+        # Expand camera origin
+        self.ray_origins = self.cam_center.view(1, 1, 3).expand(self.height, self.width, 3)
+        
+        return self.rays
+    
+    def calc_incidence_angle_of_rays(self,
+    ):
+        self.incidence_angle = torch.acos(torch.clamp(self.rays[:, :, 2], -1, 1))  # (H, W) tensor with angle in radians
+        
+    
+    ### -----------------------------------
+    ###        Environment map
+    ### -----------------------------------
+    def load_environment_map(self, 
+                             envmap_path: str = None,
+    ):
+        """
+        Load environment map for rendering.
+        """
+        env_np = imageio.imread(envmap_path, format=envmap_path.split('.')[-1])
+        self.env = env = torch.from_numpy(env_np).permute(2,0,1).unsqueeze(0).to(self.device) # (1, C, H, W)
+    
+    def get_colors_from_envmap(self, 
+                               rays: torch.Tensor = None,
+    ):
+        """
+        Get colors from environment map.
+        """
+        if not hasattr(self, 'env'):
+            raise ValueError("Environment map is not loaded. Please load it using `load_environment_map` method.")
+        
+        x, y, z = rays.unbind(dim=-1)
+        phi = torch.atan2(y, x)                           # [-pi, pi] # longitude
+        self.incidence_angle = torch.acos(torch.clamp(z, -1,1))          # [0, pi] # latitude
+        u = phi / (2*torch.pi) + 0.5                      # [0, 1]4
+        u = u % 1.0                                       # [0, 1]
+        v = self.incidence_angle / torch.pi               # [0, 1]
+        grid = torch.stack([2*u-1, 2*v-1], dim=-1)        # [−1,1]^2
+
+        N = self.width * self.height
+        grid = grid.view(1, N, 1, 2)
+        
+        C = self.env.shape[1]  # Number of channels in the environment map
+        sampled = F.grid_sample(self.env, grid, align_corners=True, mode="bilinear")
+        self.env_colors = sampled.view(4, N).permute(1,0).reshape(self.height, self.width, C)  # (H, W, C)
+        
+        return self.env_colors # (N, 4) tensor with RGBA colors
+    
+    
+    ### -----------------------------------
+    ###        Refrection model
+    ### -----------------------------------
+    
+    def calc_refrected_ray(self, 
+    ):
+        """
+        Calculate the refracted ray direction.
+        """
+        self.refrected_rays = self.rays.clone()
+        self.refrected_rays[:, :, 2] = - self.rays[:, :, 2]
+        return self.refrected_rays
+    
+    def calc_refraction_angle_of_each_pixel(self,
+    ):
+        """
+        Calculate the refraction angle of each pixel.
+        """
+        self.refraction_angle = torch.asin(torch.clamp(torch.sin(self.incidence_angle) / self.n, -1, 1))
+        
+    def fresnel_reflectance(self, 
+    ):
+        """
+        Calculate Fresnel reflectance using Schlick's approximation.
+        https://www.optics-words.com/kogaku_kiso/Frenel-equations.html
+        """
+        if not hasattr(self, 'refraction_angle'):
+            self.calc_refraction_angle_of_each_pixel()
+        # specular reflectance, when the angle of incidence is 0
+        self.specular_reflectance_ratio = ((self.n - 1) / (self.n + 1)) ** 2
+        cos_theta_i = torch.clamp(-self.rays[:,:,2], -1, 1)  # cos(theta_i) for incidence angle
+        self.spec = self.specular_reflectance_ratio + (1 - self.specular_reflectance_ratio) * (1 - cos_theta_i) ** 5
+        self.spec = torch.clamp(self.spec, min=0, max=1)
+        self.trans = 1 - self.spec
+        
+        self.spec = self.spec.unsqueeze(-1)
+        self.trans.unsqueeze_(-1)
+        
+        return self.specular_reflectance_ratio, self.spec, self.trans
+        
