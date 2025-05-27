@@ -65,6 +65,8 @@ class WaterSurface():
         
         self.n2 = self.n ** 2
         self.n2m1 = self.n2 - 1
+        self.reci_n = 1 / self.n # reciprocal of n 逆数
+        self.reci_n2 = 1 / self.n2 
         self.H2 = self.H ** 2
         self.r2 = self.r ** 2
         self.x2 = self.x ** 2
@@ -356,7 +358,7 @@ class WaterSurface():
     
         self.rays = torch.stack([
             (u - cx) / fx,
-            -(v - cy) / fy,
+            (v - cy) / fy,
             torch.ones_like(u) 
         ], dim=-1)  # (H, W, 3)
     
@@ -383,8 +385,23 @@ class WaterSurface():
         """
         Load environment map for rendering.
         """
-        env_np = imageio.imread(envmap_path, format=envmap_path.split('.')[-1])
-        self.env = env = torch.from_numpy(env_np).permute(2,0,1).unsqueeze(0).to(self.device) # (1, C, H, W)
+        format = envmap_path.split('.')[-1].lower() # lower() -> 小文字に
+        env_np = imageio.imread(envmap_path, format=format)
+        
+        if env_np.dtype == np.uint8:
+            # 8-bit LDR image: map [0,255] → [0,1]
+            env_np = env_np.astype(np.float32) / 255.0 
+        else:
+            # exposure/gamma header you want to apply
+            exposure = 1.0
+            gammna = 2.2
+            
+            hdr_exp = env_np * (2.0**exposure )
+            tonemap = hdr_exp ** (1.0 / gammna)
+            env_np = tonemap.astype(np.float32)
+                        
+        
+        self.env = torch.from_numpy(env_np).permute(2,0,1).unsqueeze(0).to(self.device) # (1, C, H, W)
     
     def get_colors_from_envmap(self, 
                                rays: torch.Tensor = None,
@@ -408,9 +425,9 @@ class WaterSurface():
         
         C = self.env.shape[1]  # Number of channels in the environment map
         sampled = F.grid_sample(self.env, grid, align_corners=True, mode="bilinear")
-        self.env_colors = sampled.view(4, N).permute(1,0).reshape(self.height, self.width, C)  # (H, W, C)
+        self.env_colors = sampled.view(C, N).permute(1,0).reshape(self.height, self.width, C)  # (H, W, C)
         
-        return self.env_colors # (N, 4) tensor with RGBA colors
+        return self.env_colors[:,:,:3] if C == 4 else self.env_colors # (N, 3) tensor with RGB colors
     
     
     ### -----------------------------------
@@ -426,30 +443,44 @@ class WaterSurface():
         self.refrected_rays[:, :, 2] = - self.rays[:, :, 2]
         return self.refrected_rays
     
-    def calc_refraction_angle_of_each_pixel(self,
-    ):
-        """
-        Calculate the refraction angle of each pixel.
-        """
-        self.refraction_angle = torch.asin(torch.clamp(torch.sin(self.incidence_angle) / self.n, -1, 1))
+    # def calc_refraction_angle_of_each_pixel(self,
+    # ):
+    #     """
+    #     Calculate the refraction angle of each pixel.
+    #     """
+    #     self.refraction_angle = torch.asin(torch.clamp(torch.sin(self.incidence_angle) / self.n, -1, 1))
         
-    def fresnel_reflectance(self, 
+    def schlick_fresnel_reflectance(self, 
     ):
         """
         Calculate Fresnel reflectance using Schlick's approximation.
         https://www.optics-words.com/kogaku_kiso/Frenel-equations.html
         """
-        if not hasattr(self, 'refraction_angle'):
-            self.calc_refraction_angle_of_each_pixel()
         # specular reflectance, when the angle of incidence is 0
-        self.specular_reflectance_ratio = ((self.n - 1) / (self.n + 1)) ** 2
-        cos_theta_i = torch.clamp(-self.rays[:,:,2], -1, 1)  # cos(theta_i) for incidence angle
-        self.spec = self.specular_reflectance_ratio + (1 - self.specular_reflectance_ratio) * (1 - cos_theta_i) ** 5
-        self.spec = torch.clamp(self.spec, min=0, max=1)
-        self.trans = 1 - self.spec
+        self.spec_refle_ratio = ((self.n - 1) / (self.n + 1)) ** 2
+        self.cos_theta_i = torch.clamp(-self.rays[:,:,2], -1, 1)  # cos(theta_i) for incidence angle
+        print(f"cos_theta_i:\n {self.cos_theta_i}")
+        self.spec_schlick = self.spec_refle_ratio + (1 - self.spec_refle_ratio) * (1 - self.cos_theta_i) ** 5
+        self.spec_schlick = torch.clamp(self.spec_schlick, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+        self.trans_schlick = 1 - self.spec_schlick
         
-        self.spec = self.spec.unsqueeze(-1)
-        self.trans.unsqueeze_(-1)
+        return self.spec_refle_ratio, self.spec_schlick, self.trans_schlick
         
-        return self.specular_reflectance_ratio, self.spec, self.trans
+    def fresnel_reflectance(self, 
+    ):
+        """
+        Calculate Fresnel reflectance using the Fresnel equations.
+        http://marupeke296.com/DXPS_PS_No7_FresnelReflection.html
+        """
+        A = self.reci_n
+        B = self.cos_theta_i = torch.clamp(-self.rays[:, :, 2], -1, 1)  # cos(theta_i) for incidence angle
+        C = torch.sqrt(1 - (self.reci_n2 * (1 - self.cos_theta_i ** 2))) 
         
+        Rs = ((A*B - C) / (A*B + C))**2
+        Rp = ((A*C - B) / (A*C + B))**2
+        self.spec_ave = (Rs + Rp) / 2.0
+        self.spec_ave = torch.clamp(self.spec_ave, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+        
+        self.trans_ave = 1 - self.spec_ave
+        
+        return self.spec_ave, self.trans_ave
