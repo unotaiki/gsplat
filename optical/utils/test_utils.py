@@ -164,3 +164,28 @@ def compare_rasterization_variants(
 
     plt.tight_layout()
     plt.show()
+
+def np_rgb_render(
+    means: torch.Tensor,
+    quats: torch.Tensor,
+    scales: torch.Tensor,
+    opacities: torch.Tensor,
+    colors: torch.Tensor,
+    worldtocam: torch.Tensor,
+    Ks: torch.Tensor,
+    width: int,
+    height: int,
+    sh_degree: int = 0,
+    rasterize_mode: str = "antialiased"
+):
+    rgb, _, _ = rasterization(
+        means,
+        quats,
+        scales,
+        opacities, colors,
+        worldtocam, Ks,
+        width, height,
+        sh_degree=sh_degree,
+        rasterize_mode=rasterize_mode
+    )
+    return rgb.squeeze().detach().cpu().numpy()

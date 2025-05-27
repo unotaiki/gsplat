@@ -227,7 +227,7 @@ class WaterSurface():
             
         return self.jacobian
     
-    def calc_spatial_compression(self,
+    def calc_spatial_compression_by_volume(self,
     ):
         """
         ヤコビアンを構成する3つのベクトルで構成される六面体の体積
@@ -241,7 +241,26 @@ class WaterSurface():
         
         cross_xy = torch.cross(d_xa, d_ya, dim=1)
         self.volume_compression_ratio = torch.abs(torch.sum(d_za * cross_xy, dim=1)) # (N,)    
+    
+    def calc_spatial_compression_by_edges(self,
+    ):
+        """
+        ヤコビアンを構成する3つのベクトルで構成される六面体の辺の長さの変化率の積
+        """
+        # Ensure spatial compression have been computed
+        if getattr(self, 'jacobian', None) is None:
+            _ = self.dPa_dP()       
+             
+        d_xa = self.jacobian[:, 0, :]
+        d_ya = self.jacobian[:, 1, :]
+        d_za = self.jacobian[:, 2, :]
         
+        edge_x = torch.norm(d_xa, dim=1) # (N,)
+        edge_y = torch.norm(d_ya, dim=1)
+        edge_z = torch.norm(d_za, dim=1) 
+        
+        self.edge_compression_ratio = edge_x * edge_y * edge_z # (N,)
+             
         
     ### ------------------------------
     ###        Calcurate SCALE corrected by quaternion
@@ -253,28 +272,44 @@ class WaterSurface():
         if getattr(self, 'jacobian', None) is None:
             _ = self.dPa_dP()
         if getattr(self, 'volume_compression_ratio', None) is None:
-            self.calc_spatial_compression()
+            self.calc_spatial_compression_by_volume()
         
         # calculate scale correction factor from volume compression rario
-        self.scale_correction_factor = self.volume_compression_ratio**(1/3) # (N,)
-        logK = torch.log(self.scale_correction_factor).unsqueeze(-1) # (N, 1)
+        self.scale_correction_factor_by_volume = self.volume_compression_ratio**(1/3) # (N,)
+        logK = torch.log(self.scale_correction_factor_by_volume).unsqueeze(-1) # (N, 1)
         self.new_scales = logK + self.scales 
         return self.new_scales
     
     def scale_correction_as_real(self,
+                                 comp_by: str = "volume" # "volume" or "edges"
     ):
         # Ensure spatial compression have been computed
         if getattr(self, 'jacobian', None) is None:
             _ = self.dPa_dP()
-        if getattr(self, 'volume_compression_ratio', None) is None:
-            self.calc_spatial_compression()
+            
+        if comp_by == "volume":
+            if getattr(self, 'volume_compression_ratio', None) is None:
+                self.calc_spatial_compression_by_volume()
+
+            # calculate scale correction factor from volume compression rario
+            self.scale_correction_factor_by_volume = self.volume_compression_ratio**(1/3) # (N,)
+            # self.scale_correction_factor = self.volume_compression_ratio**1 # (N,)
+            K = self.scale_correction_factor_by_volume.unsqueeze(-1) # (N, 1)
+            self.new_scales = K * self.scales 
+            return self.new_scales
         
-        # calculate scale correction factor from volume compression rario
-        self.scale_correction_factor = self.volume_compression_ratio**(1/3) # (N,)
-        # self.scale_correction_factor = self.volume_compression_ratio**1 # (N,)
-        K = self.scale_correction_factor.unsqueeze(-1) # (N, 1)
-        self.new_scales = K * self.scales 
-        return self.new_scales
+        elif comp_by == "edges":
+            if getattr(self, 'edge_compression_ratio', None) is None:
+                self.calc_spatial_compression_by_edges()
+
+            # calculate scale correction factor from edge compression ratio
+            self.scale_correction_factor_by_edges = self.edge_compression_ratio**(1/3)
+            K = self.scale_correction_factor_by_edges.unsqueeze(-1) # (N, 1)
+            self.new_scales = K * self.scales
+            return self.new_scales
+        else:
+            raise ValueError("comp_by must be 'volume' or 'edges'.")
+        
     
     # Rayの距離による補間 ← 3D空間が歪むことが原因のため、不適
     # def scale_correction(self,
