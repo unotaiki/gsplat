@@ -484,3 +484,31 @@ class WaterSurface():
         self.trans_ave = 1 - self.spec_ave
         
         return self.spec_ave, self.trans_ave
+
+    
+    
+    def fresnel(self,
+    ):
+        n_i = self.n
+        n_t = 1.0
+        
+        self.cos_theta_air = torch.clamp(-self.rays[:, :, 2], -1, 1)
+        print(f"cos_theta_air:\n {self.cos_theta_air}")
+        theta_air = torch.acos(self.cos_theta_air)  # angle in radians
+        print(f"theta_air:\n {theta_air}")
+        sin_theta_t = torch.sin(theta_air) * n_i / n_t  # if this > 1, the ray must be
+        print(f"sin_theta_t:\n {sin_theta_t}")
+        cos_theta_t = torch.sqrt(torch.clip(1 - sin_theta_t**2, 0, 1))
+        
+        rs = ((n_t*self.cos_theta_air - n_i*cos_theta_t)/(n_t*self.cos_theta_air + n_i*cos_theta_t))**2
+        rp = ((n_i*self.cos_theta_air - n_t*cos_theta_t)/(n_i*self.cos_theta_air + n_t*cos_theta_t))**2
+        reflectance = (rs + rp) / 2       
+        
+        self.spec = torch.where(sin_theta_t > 1, 1.0, reflectance)  # Use Rs for incidence and Rp for transmission
+        self.spec = torch.clamp(self.spec, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+        self.trans = 1.0 - self.spec
+        return self.spec, self.trans
+        
+
+        
+        
