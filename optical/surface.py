@@ -458,13 +458,13 @@ class WaterSurface():
         """
         # specular reflectance, when the angle of incidence is 0
         self.spec_refle_ratio = ((self.n - 1) / (self.n + 1)) ** 2
-        self.cos_theta_i = torch.clamp(-self.rays[:,:,2], -1, 1)  # cos(theta_i) for incidence angle
-        print(f"cos_theta_i:\n {self.cos_theta_i}")
-        self.spec_schlick = self.spec_refle_ratio + (1 - self.spec_refle_ratio) * (1 - self.cos_theta_i) ** 5
-        self.spec_schlick = torch.clamp(self.spec_schlick, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
-        self.trans_schlick = 1 - self.spec_schlick
+        self.cos_theta_air = torch.clamp(-self.rays[:,:,2], -1, 1)  # cos(theta_i) for incidence angle
+        print(f"cos_theta_i:\n {self.cos_theta_air}")
+        self.spec_a2w = self.spec_refle_ratio + (1 - self.spec_refle_ratio) * (1 - self.cos_theta_air) ** 5
+        self.spec_a2w = torch.clamp(self.spec_a2w, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+        self.trans_a2w = 1 - self.spec_a2w
         
-        return self.spec_refle_ratio, self.spec_schlick, self.trans_schlick
+        return self.spec_refle_ratio, self.spec_a2w, self.trans_a2w
         
     def fresnel_reflectance(self, 
     ):
@@ -473,8 +473,8 @@ class WaterSurface():
         http://marupeke296.com/DXPS_PS_No7_FresnelReflection.html
         """
         A = self.reci_n
-        B = self.cos_theta_i = torch.clamp(-self.rays[:, :, 2], -1, 1)  # cos(theta_i) for incidence angle
-        C = torch.sqrt(1 - (self.reci_n2 * (1 - self.cos_theta_i ** 2))) 
+        B = self.cos_theta_air = torch.clamp(-self.rays[:, :, 2], -1, 1)  # cos(theta_i) for incidence angle
+        C = torch.sqrt(1 - (self.reci_n2 * (1 - self.cos_theta_air ** 2))) 
         
         Rs = ((A*B - C) / (A*B + C))**2
         Rp = ((A*C - B) / (A*C + B))**2
@@ -487,28 +487,68 @@ class WaterSurface():
 
     
     
-    def fresnel(self,
+    # def fresnel_water2air(self,
+    # ):
+    #     n_i = self.n
+    #     n_t = 1.0
+        
+    #     self.cos_theta_air = torch.clamp(-self.rays[:, :, 2], -1, 1)
+    #     theta_air = torch.acos(self.cos_theta_air)  # angle in radians
+        
+    #     sin_theta_t = torch.sin(theta_air) * n_i / n_t  # if this > 1, the ray must be
+    #     cos_theta_t = torch.sqrt(torch.clip(1 - sin_theta_t**2, 0, 1))
+        
+    #     rs = ((n_t*self.cos_theta_air - n_i*cos_theta_t)/(n_t*self.cos_theta_air + n_i*cos_theta_t))**2
+    #     rp = ((n_i*self.cos_theta_air - n_t*cos_theta_t)/(n_i*self.cos_theta_air + n_t*cos_theta_t))**2
+    #     reflectance = (rs + rp) / 2       
+        
+    #     self.spec_w2a = torch.where(sin_theta_t > 1, 1.0, reflectance)  # Use Rs for incidence and Rp for transmission
+    #     self.spec_w2a = torch.clamp(self.spec_w2a, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+    #     self.trans_w2a = 1.0 - self.spec_w2a
+    #     return self.spec_w2a, self.trans_w2a
+    
+    def fresnel_air2water(self,
+    ):
+        # specular reflectance, when the angle of incidence is 0
+        r0 = ((self.n - 1) / (self.n + 1)) ** 2
+        self.cos_theta_air = torch.clamp(-self.rays[:,:,2], -1, 1)  # cos(theta_i) for incidence angle
+        self.spec_a2w = r0 + (1 - self.spec_refle_ratio) * (1 - self.cos_theta_air) ** 5
+        self.spec_a2w = torch.clamp(self.spec_a2w, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+        self.trans_a2w = 1 - self.spec_a2w
+        
+        return self.spec_a2w, self.trans_a2w
+        
+    
+    def fresnel_water2air_(self,
     ):
         n_i = self.n
         n_t = 1.0
         
-        self.cos_theta_air = torch.clamp(-self.rays[:, :, 2], -1, 1)
-        print(f"cos_theta_air:\n {self.cos_theta_air}")
-        theta_air = torch.acos(self.cos_theta_air)  # angle in radians
-        print(f"theta_air:\n {theta_air}")
-        sin_theta_t = torch.sin(theta_air) * n_i / n_t  # if this > 1, the ray must be
-        print(f"sin_theta_t:\n {sin_theta_t}")
-        cos_theta_t = torch.sqrt(torch.clip(1 - sin_theta_t**2, 0, 1))
+        self.cos_theta_ray = torch.clamp(-self.rays[:, :, 2], -1, 1)
+        theta_ray = torch.acos(self.cos_theta_ray)  # angle in radians
         
-        rs = ((n_t*self.cos_theta_air - n_i*cos_theta_t)/(n_t*self.cos_theta_air + n_i*cos_theta_t))**2
-        rp = ((n_i*self.cos_theta_air - n_t*cos_theta_t)/(n_i*self.cos_theta_air + n_t*cos_theta_t))**2
-        reflectance = (rs + rp) / 2       
+        sin_theta_water = torch.sin(theta_ray) * n_t / n_i  # if this > 1, the ray must be
+        cos_theta_i = torch.sqrt(torch.clip(1 - sin_theta_water**2, 0, 1))
         
-        self.spec = torch.where(sin_theta_t > 1, 1.0, reflectance)  # Use Rs for incidence and Rp for transmission
-        self.spec = torch.clamp(self.spec, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
-        self.trans = 1.0 - self.spec
-        return self.spec, self.trans
-        
-
-        
-        
+        spec = fresnel_ref(
+            n_i=n_i,
+            n_t=n_t,
+            cos_theta_i=cos_theta_i,
+            cos_theta_t=self.cos_theta_ray
+        )
+          
+        self.spec_w2a = torch.clamp(spec, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+        self.trans_w2a = 1.0 - self.spec_w2a
+        return self.spec_w2a, self.trans_w2a
+    
+def fresnel_ref(
+    n_i: float,
+    n_t: float,
+    cos_theta_i: torch.Tensor,
+    cos_theta_t: torch.Tensor,
+):
+    rs = ((n_i * cos_theta_i - n_t * cos_theta_t) / (n_i * cos_theta_i + n_t * cos_theta_t)) ** 2
+    rp = ((n_t * cos_theta_i - n_i * cos_theta_t) / (n_t * cos_theta_i + n_i * cos_theta_t)) ** 2
+    reflectance = (rs + rp) / 2.0
+    
+    return reflectance
