@@ -521,25 +521,47 @@ class WaterSurface():
     
     def fresnel_water2air_(self,
     ):
-        n_i = self.n
-        n_t = 1.0
+        n_w = self.n
+        n_a = 1.0
         
-        self.cos_theta_ray = torch.clamp(-self.rays[:, :, 2], -1, 1)
-        theta_ray = torch.acos(self.cos_theta_ray)  # angle in radians
+        cos_theta_w = torch.clamp(-self.rays[:, :, 2], -1, 1)
+        print(f"cos_theta_w:\n {cos_theta_w.shape}")
+        theta_w = torch.acos(cos_theta_w)  # angle in radians
+        print(f"theta_w:\n {theta_w.shape}")
         
-        sin_theta_water = torch.sin(theta_ray) * n_t / n_i  # if this > 1, the ray must be
-        cos_theta_i = torch.sqrt(torch.clip(1 - sin_theta_water**2, 0, 1))
+        sin_theta_a = torch.sin(theta_w) * n_w / n_a  # if this > 1, the ray must be 全反射
+        cos_theta_i = torch.sqrt(torch.clip(1 - sin_theta_a**2, 0, 1))
+        print(f"sin_theta_a:\n {sin_theta_a.shape}")
         
-        spec = fresnel_ref(
-            n_i=n_i,
-            n_t=n_t,
-            cos_theta_i=cos_theta_i,
-            cos_theta_t=self.cos_theta_ray
-        )
+        rs = ((n_a*cos_theta_w - n_w*cos_theta_i)/(n_a*cos_theta_w + n_w*cos_theta_i))**2
+        rp = ((n_w*cos_theta_w - n_a*cos_theta_i)/(n_w*cos_theta_w + n_a*cos_theta_i))**2
+        print(f"rs:\n {rs.shape},\n rp:\n {rp.shape}")
+        reflectance = (rs + rp) / 2.0
+        print(f"reflectance:\n {reflectance.shape}")
+        reflectance = reflectance.clamp(min=0, max=1) # (H, W)
+        print(f"reflectance:\n {reflectance.shape}")
+        
+        reflectance = reflectance 
+        
+        # when sin_theta_a > 1, the ray must be 全反射
+        spec = torch.where(sin_theta_a > 1, torch.ones_like(reflectance), reflectance).unsqueeze(-1)
+        print(f"spec:\n {spec.shape}")
+            
+        trans = 1.0 - spec
+        print(f"spec:\n {spec.shape}")
+        
+        return spec, trans
+        
+        # spec = fresnel_ref(
+        #     n_i=n_w,
+        #     n_t=n_a,
+        #     cos_theta_i=cos_theta_i,
+        #     cos_theta_t=self.cos_theta_w
+        # )
           
-        self.spec_w2a = torch.clamp(spec, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
-        self.trans_w2a = 1.0 - self.spec_w2a
-        return self.spec_w2a, self.trans_w2a
+        # self.spec_w2a = torch.clamp(spec, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+        # self.trans_w2a = 1.0 - self.spec_w2a
+        # return self.spec_w2a, self.trans_w2a
     
 def fresnel_ref(
     n_i: float,

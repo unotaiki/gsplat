@@ -189,3 +189,38 @@ def np_rgb_render(
         rasterize_mode=rasterize_mode
     )
     return rgb.squeeze().detach().cpu().numpy()
+
+
+def colormap_ray_angle_and_ratio(
+    rays: torch.Tensor,
+    ratio: torch.Tensor,
+):
+    """
+    convert rays into a colormap based on angle and refrection ratio.
+
+    Args:
+        rays (torch.Tensor): _description_
+    """
+    
+    if rays.shape[-1] == 3:
+        cos_theta = torch.clamp(-rays[..., 2], -1.0, 1.0)
+    
+    theta = torch.acos(cos_theta) * 180.0 / np.pi  # convert to degrees
+    theta = theta.detach().cpu().numpy()    
+    ratio = ratio.squeeze().detach().cpu().numpy()
+    
+    plt.figure(figsize=(10, 5))
+    plt.subplot(1, 2, 1)
+    plt.imshow(theta, cmap="plasma")
+    plt.axis("off")
+    plt.title("Ray Angle (degrees)")
+    plt.colorbar(label="Angle (degrees)")
+    plt.subplot(1, 2, 2)
+    plt.imshow(ratio, cmap="plasma")
+    plt.axis("off")
+    plt.title("Ratio")
+    plt.colorbar(label="Ratio")
+    plt.tight_layout()
+    plt.show()
+    
+    
