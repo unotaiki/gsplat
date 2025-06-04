@@ -487,25 +487,28 @@ class WaterSurface():
 
     
     
-    # def fresnel_water2air(self,
-    # ):
-    #     n_i = self.n
-    #     n_t = 1.0
+    def fresnel_water2air(self,
+    ):
+        # n_i = self.n
+        # n_t = 1.0       
         
-    #     self.cos_theta_air = torch.clamp(-self.rays[:, :, 2], -1, 1)
-    #     theta_air = torch.acos(self.cos_theta_air)  # angle in radians
+        n_i = 1.0
+        n_t = self.n
         
-    #     sin_theta_t = torch.sin(theta_air) * n_i / n_t  # if this > 1, the ray must be
-    #     cos_theta_t = torch.sqrt(torch.clip(1 - sin_theta_t**2, 0, 1))
+        self.cos_theta_air = torch.clamp(-self.rays[:, :, 2], -1, 1)
+        theta_air = torch.acos(self.cos_theta_air)  # angle in radians
         
-    #     rs = ((n_t*self.cos_theta_air - n_i*cos_theta_t)/(n_t*self.cos_theta_air + n_i*cos_theta_t))**2
-    #     rp = ((n_i*self.cos_theta_air - n_t*cos_theta_t)/(n_i*self.cos_theta_air + n_t*cos_theta_t))**2
-    #     reflectance = (rs + rp) / 2       
+        sin_theta_t = torch.sin(theta_air) * n_i / n_t  # if this > 1, the ray must be
+        cos_theta_t = torch.sqrt(torch.clip(1 - sin_theta_t**2, 0, 1))
         
-    #     self.spec_w2a = torch.where(sin_theta_t > 1, 1.0, reflectance)  # Use Rs for incidence and Rp for transmission
-    #     self.spec_w2a = torch.clamp(self.spec_w2a, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
-    #     self.trans_w2a = 1.0 - self.spec_w2a
-    #     return self.spec_w2a, self.trans_w2a
+        rs = ((n_t*self.cos_theta_air - n_i*cos_theta_t)/(n_t*self.cos_theta_air + n_i*cos_theta_t))**2
+        rp = ((n_i*self.cos_theta_air - n_t*cos_theta_t)/(n_i*self.cos_theta_air + n_t*cos_theta_t))**2
+        reflectance = (rs + rp) / 2       
+        
+        self.spec_w2a = torch.where(sin_theta_t > 1, 1.0, reflectance)  # Use Rs for incidence and Rp for transmission
+        self.spec_w2a = torch.clamp(self.spec_w2a, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+        self.trans_w2a = 1.0 - self.spec_w2a
+        return self.spec_w2a, self.trans_w2a
     
     def fresnel_air2water(self,
     ):
