@@ -46,13 +46,28 @@ class TransformWaterSurface():
             newton_tol=newton_tol
         )
         
-        t_means, t_quats = WS.transform_to_appearance_position()
-        dPa_dP = WS.dPa_dP()  # Jacobian of the transformation
-        t_scales = WS.scale_correction_as_real(comp_by="edges")  # Scale correction
+        t_means = WS.transform_means()  # Get the transformed means
+        dPa_dP = WS.dPa_dP(method="numercial")  # Jacobian of means transformation # numerical or theoretical
         
+        t_quats = WS.transform_quats(method="dPa_dP")  # dPa_dP, ray_angle
+        t_scales = WS.calc_transform_scales(comp_by="edges", comp_coeff="1/3")  # Scale correction
         
+        dSa_dS = WS.dSa_dS()  # Jacobian of scales transformation
         
-        return water_surface.transform_to_appearance()
+        ctx.save_for_backward(dPa_dP, dSa_dS)
+        return t_means, t_quats, t_scales
+    
+    @staticmethod
+    def backward(ctx, grad_means, grad_quats, grad_scales):
+        dPa_dP, dSa_dS = ctx.saved_tensors
+        
+        # Calculate gradients with respect to means, quats, and scales
+        grad_means = (grad_means*dPa_dP).sum(1, keepdim=True) 
+        grad_scales = (grad_scales*dSa_dS).sum(1, keepdim=True)
+        
+        return grad_means, None, grad_scales, None, None, None, None, None
+    
+    
 
 class WaterSurface():
     def __init__(self, 
@@ -60,29 +75,42 @@ class WaterSurface():
                  means: torch.Tensor = None,
                  quats: torch.Tensor = None,
                  scales: torch.Tensor = None,
-                 opacities: torch.Tensor = None,
                  
                  camtoworld: torch.Tensor = None, # (4, 4) matrix
-                 cam_center: torch.Tensor = None,
+                 cam_center: torch.Tensor = None, # (3,) vector
                  K: torch.Tensor = None, # (3, 3) matrix
                  width: int = None,
                  height: int = None, 
                  
                  n: torch.Tensor = 1.33, 
                  plane: torch.Tensor = 0,
-                 flag_solve_quartic_by_newton: bool = True,
+                 
+                 # t_means
+                 method_solve_quartic: str = "newton", # "newton" or "ferrari"
                  newton_iters: int = 10,
                  newton_tol: float = 1e-6,
-                 numercial_jacobians_delta: float = 1e-4,
+                 
+                 # dPa_dP
+                 delta_numercial_jacobian: float = 1e-4,
+                 
+                 # t_quats
+                 method_transform_quats: str = "dPa_dP", # "dPa_dP" or "difference_ray_angle"
+                 # t_scales
+                 method_transform_scales: str = "edges", # "volume" or "edges" or "ray_length"
+                 coeff_transform_scales: float = 1/3,    # "1/2" or "1/3"
                  
     ):
         self.n = torch.tensor(n, dtype=torch.float32, device=device, requires_grad=False)
         self.plane = torch.tensor(plane, dtype=torch.float32, device=device, requires_grad=False)
         self.device = device
-        self.flag_solve_quartic_by_newton = flag_solve_quartic_by_newton
+        
+        self.method_solve_quartic = method_solve_quartic.lower()
         self.newton_iters = newton_iters
         self.newton_tol = newton_tol
-        self.numerical_jacobians_delta = numercial_jacobians_delta
+        self.delta_numercial_jacobian = delta_numercial_jacobian
+        self.method_transform_quats = method_transform_quats
+        self.method_transform_scales = method_transform_scales
+        self.method_coeff_transform_scales = coeff_transform_scales
         
         self.camtoworld = camtoworld
         self.cam_center = self.camtoworld[:3, 3] if camtoworld is not None else cam_center
@@ -97,7 +125,7 @@ class WaterSurface():
         self.means = means
         self.quats = quats
         self.scales = scales
-        self.opacities = opacities
+        # self.opacities = opacities
         self.num_g = means.shape[0]
         
         self.x = means[:, 0] - self.x0
@@ -134,9 +162,9 @@ class WaterSurface():
     def calc_intersection(self,
     ):
         a4, a3, a2, a1, a0 = self.calculate_quartic_terms()  
-        if self.flag_solve_quartic_by_newton:
+        if self.method_solve_quartic == "newton":
             self.s = solve_quartic_newton(a4, a3, a2, a1, a0, self.r, num_iters=self.newton_iters, tol=self.newton_tol)
-        else:
+        elif self.method_solve_quartic == "ferrari":
             s = solve_quartic_ferrari(a4, a3, a2, a1, a0)
             # s is like roots = torch.stack([r1 - z0, r2 - z0, r3 - z0, r4 - z0], dim=-1) of dtype = torch.complex128
             # Extract real roots (imaginary part is close to zero)
@@ -145,31 +173,32 @@ class WaterSurface():
             s_real[~real_mask] = float('inf')  # Mark non-real roots as infinity
             # Find the smallest real root for each Gaussian
             self.s = torch.min(s_real, dim=-1).values
+        else:
+            raise ValueError(f"Unknown method for solving quartic equation: {self.method_solve_quartic}")
         
         # self.s = torch.where(self.s < self.r, self.s, self.r * 0.99) this is not needed
-        self.s2 = self.s ** 2
         
         # compute intersection point
-        self.xs = self.s * torch.cos(self.phi)
-        self.ys = self.s * torch.sin(self.phi)
-        mH_vec = torch.full_like(self.xs, -self.H, device=self.device, dtype=self.xs.dtype)
+        # self.xs = self.s * torch.cos(self.phi)
+        # self.ys = self.s * torch.sin(self.phi)
+        # mH_vec = torch.full_like(self.xs, -self.H, device=self.device, dtype=self.xs.dtype)
         
         # compute Ray direction from camera center to intersection point
         # this means the direction from camera center to the apparent position of the Gaussian
-        self.ray_cam2intersec = torch.stack(
-            [self.xs, 
-             self.ys, 
-             mH_vec], dim=1
-        )
-        self.unit_dir_to_apparent = self.ray_cam2intersec / torch.norm(self.ray_cam2intersec, dim=1, keepdim=True).clamp(min=1e-8)
+        # self.ray_cam2intersec = torch.stack(
+        #     [self.xs, 
+        #      self.ys, 
+        #      mH_vec], dim=1
+        # )
+        # self.unit_dir_to_apparent = self.ray_cam2intersec / torch.norm(self.ray_cam2intersec, dim=1, keepdim=True).clamp(min=1e-8)
         
-        # compute Ray direction from intersection point to real Gaussian center
-        self.ray_intersec2gaussian = torch.stack(
-            [self.x - self.xs, 
-             self.y - self.ys, 
-             self.z], dim=1
-        )
-        self.unit_dir_intersec2gaussian = self.ray_intersec2gaussian / torch.norm(self.ray_intersec2gaussian, dim=1, keepdim=True).clamp(min=1e-8)
+        # # compute Ray direction from intersection point to real Gaussian center
+        # self.ray_intersec2gaussian = torch.stack(
+        #     [self.x - self.xs, 
+        #      self.y - self.ys, 
+        #      self.z], dim=1
+        # )
+        # self.unit_dir_intersec2gaussian = self.ray_intersec2gaussian / torch.norm(self.ray_intersec2gaussian, dim=1, keepdim=True).clamp(min=1e-8)
         
     def calc_theta(self,
     ):
@@ -177,66 +206,74 @@ class WaterSurface():
         self.theta1 = torch.atan((self.r - self.s) / (-self.z))
         self.d_theta = self.theta0 - self.theta1
         
-    def calc_ray_length(self,
-    ):
-        self.len_cam2intersec = torch.norm(self.ray_cam2intersec, dim=1)
-        self.len_intersec2gaussian = torch.norm(self.ray_intersec2gaussian, dim=1)
+    # def calc_ray_length(self,
+    # ):
+    #     self.len_cam2intersec = torch.norm(self.ray_cam2intersec, dim=1)
+    #     self.len_intersec2gaussian = torch.norm(self.ray_intersec2gaussian, dim=1)
         
-        self.ray_intersec2apparent = torch.stack(
-            [self.x_app - self.xs, 
-             self.y_app - self.ys, 
-             self.z_app ], dim=1
-        )
-        self.len_intersec2apparent = torch.norm(self.ray_intersec2apparent, dim=1)
+    #     self.ray_intersec2apparent = torch.stack(
+    #         [self.x_app - self.xs, 
+    #          self.y_app - self.ys, 
+    #          self.z_app ], dim=1
+    #     )
+    #     self.len_intersec2apparent = torch.norm(self.ray_intersec2apparent, dim=1)
 
     ### ------------------------------
     ###        Calcurate apparent position of Gaussian centers
     ### ------------------------------    
-    def calc_appearance_position(self,
+    def transform_means(self,
     ):
-        self.offset_r =  self.n2m1 * self.z * (torch.tan(self.theta1)**3)    
-        self.ra = self.r + self.offset_r
-        self.z_app = 1/self.n * self.z * (torch.cos(self.theta0) / torch.cos(self.theta1))**3 
-            
-    
-    def transform_to_appearance_position(self,
-    ):        
-        self.calc_intersection()
-        self.calc_theta()
-        self.calc_appearance_position()
-        
-        # 相対座標
-        self.x_app = self.ra * torch.cos(self.phi)
-        self.y_app = self.ra * torch.sin(self.phi)
-    
-        # 見かけの位置に座標変換 (絶対座標)
-        new_x = self.x0 + self.x_app    
-        new_y = self.y0 + self.y_app    
-        new_z = self.plane + self.z_app
-        
-        self.new_means = torch.stack([new_x, new_y, new_z], dim=1)
-        # self.new_quats = self.calc_apparent_quaternion()
-        
-        return self.new_means #, self.new_quats
+        """
+        Calculate the apparent position of Gaussian centers.
+        """
+        if not hasattr(self, 's'):
+            self.calc_intersection()
+        if not hasattr(self, 'theta0'):
+            self.calc_theta()
 
+        # calculate the offset in the radial and vertical directions
+        self.offset_r =  self.n2m1 * self.z * (torch.tan(self.theta1)**3)  # < 0
+        self.ra = self.r + self.offset_r
+        self.za = 1/self.n * self.z * (torch.cos(self.theta0) / torch.cos(self.theta1))**3         
+        
+        # apparent position in relative coordinates
+        self.xa = self.ra * torch.cos(self.phi)
+        self.ya = self.ra * torch.sin(self.phi)
+        
+        # apparent position in absolute coordinates
+        new_x = self.x0 + self.xa
+        new_y = self.y0 + self.ya
+        new_z = self.plane + self.za
+        self.new_means = torch.stack([new_x, new_y, new_z], dim=1)
+        
+        return self.new_means
+        
 
     ### ------------------------------
     ###        Calcurate ROTATION corrected by quaternion
     ### ------------------------------
     
-    # This is not collect, we have to think about distorted space by jacobian dPa_dP
-    # def calc_apparent_quaternion(self,
-    # ):
-    #     d_q = quat_from_2dirs(self.unit_dir_intersec2gaussian, self.unit_dir_to_apparent) 
-    #     new_quats = GaussianTransformUtils.quat_multiply(self.quats, d_q)
-    #     return new_quats
+    def transform_quats(self,
+                             method: str = "dPa_dP", # "dPa_dP" or "ray_angle"
+    ):
+        """
+        Calculate the apparent quaternion based on the method specified.
+        """
+        if method == "dPa_dP":
+            return self.calc_apparent_quaternion()
+        elif method == "ray_angle":
+            return self.calc_apparent_quaternion_by_difference_ray_angle()
+        else:
+            raise ValueError(f"Unknown method for calculating apparent quaternion: {method}")
+    
+    
     def calc_apparent_quaternion(self,
     ):
         """
         Calculate the apparent quaternion based on dPa/dP.
         """
-        # if getattr(self, 'jacobian', None) is None:
-        #     _ = self.dPa_dP()  # Ensure jacobian is computed before calculating new quaternions
+        if getattr(self, 'jacobian', None) is None:
+            _ = self.dPa_dP()  # Ensure jacobian is computed before calculating new quaternions
 
         d_xa = self.jacobian[:, :, 0]
         d_ya = self.jacobian[:, :, 1]
@@ -280,40 +317,44 @@ class WaterSurface():
         self.jacobian = torch.zeros((self.num_g, 3, 3), device=self.device, dtype=self.x.dtype)
         for i in range(3):
             delta = torch.zeros((self.num_g, 3), device=self.device, dtype=self.x.dtype)
-            delta[:, i] = self.numerical_jacobians_delta
+            delta[:, i] = self.delta_numercial_jacobian
             means_plus = self.means + delta
             means_minus = self.means - delta
+            
             WS_plus = WaterSurface(
                 means=means_plus,
                 quats=self.quats,
                 scales=self.scales,
-                opacities=self.opacities,
                 cam_center=self.cam_center,
                 n=self.n,
                 plane=self.plane,
-                flag_solve_quartic_by_newton=self.flag_solve_quartic_by_newton,
+                method_solve_quartic=self.method_solve_quartic,
                 newton_iters=self.newton_iters,
                 newton_tol=self.newton_tol,
-                numercial_jacobians_delta=self.numerical_jacobians_delta
+                delta_numercial_jacobian=self.delta_numercial_jacobian
             )
             WS_minus = WaterSurface(
                 means=means_minus,
                 quats=self.quats,
                 scales=self.scales,
-                opacities=self.opacities,
                 cam_center=self.cam_center,
                 n=self.n,
                 plane=self.plane,
-                flag_solve_quartic_by_newton=self.flag_solve_quartic_by_newton,
+                method_solve_quartic=self.method_solve_quartic,
                 newton_iters=self.newton_iters,
                 newton_tol=self.newton_tol,
-                numercial_jacobians_delta=self.numerical_jacobians_delta
+                delta_numercial_jacobian=self.delta_numercial_jacobian
             )
-            t_means_plus = WS_plus.transform_to_appearance_position()
-            t_means_minus = WS_minus.transform_to_appearance_position()
-            self.jacobian[:, :, i] = (t_means_plus - t_means_minus) / (2 * self.numerical_jacobians_delta)
+            
+            t_means_plus = WS_plus.transform_means()
+            t_means_minus = WS_minus.transform_means()
+            self.jacobian[:, :, i] = (t_means_plus - t_means_minus) / (2 * self.delta_numercial_jacobian)
             
         return self.jacobian
+    
+    ### ------------------------------
+    ###       Collect apparent scales
+    ### ------------------------------
     
     def calc_spatial_compression_by_volume(self,
     ):

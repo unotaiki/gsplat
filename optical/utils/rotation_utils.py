@@ -1,33 +1,33 @@
 import torch
 
-# def quaternion_from_axis_angle(
-#     axis: torch.Tensor, 
-#     angle: torch.Tensor,
-#     eps: float = 1e-8
-# ) -> torch.Tensor:
-#     """
-#     正規化済み軸(axis)と角度(angle)からクォータニオン (w, x, y, z) を生成する。
+def quaternion_from_axis_angle(
+    axis: torch.Tensor, 
+    angle: torch.Tensor,
+    eps: float = 1e-8
+) -> torch.Tensor:
+    """
+    正規化済み軸(axis)と角度(angle)からクォータニオン (w, x, y, z) を生成する。
 
-#     Args:
-#         axis: Tensor[N, 3]  各回転軸ベクトル（任意長でも可）
-#         angle: Tensor[N]    各回転角（ラジアン）、axis.shape[:-1] にブロードキャスト可能
-#         eps: ノルム除算時の下限クリップ値
+    Args:
+        axis: Tensor[N, 3]  各回転軸ベクトル（任意長でも可）
+        angle: Tensor[N]    各回転角（ラジアン）、axis.shape[:-1] にブロードキャスト可能
+        eps: ノルム除算時の下限クリップ値
 
-#     Returns:
-#         Tensor[N, 4]  クォータニオン [w, x, y, z]
-#     """
+    Returns:
+        Tensor[N, 4]  クォータニオン [w, x, y, z]
+    """
     
     
-#     # 軸ベクトルを正規化
-#     norm = axis.norm(dim=-1, keepdim=True).clamp(min=eps)
-#     axis_unit = axis / norm
+    # 軸ベクトルを正規化
+    norm = axis.norm(dim=-1, keepdim=True).clamp(min=eps)
+    axis_unit = axis / norm
 
-#     half = angle.unsqueeze(-1) * 0.5
-#     w = torch.cos(half)
-#     s = torch.sin(half)
+    half = angle.unsqueeze(-1) * 0.5
+    w = torch.cos(half)
+    s = torch.sin(half)
 
-#     xyz = axis_unit * s
-#     return torch.cat([w, xyz], dim=-1)
+    xyz = axis_unit * s
+    return torch.cat([w, xyz], dim=-1)
 
 
 def quat_from_2dirs(
