@@ -50,7 +50,7 @@ class TransformWaterSurface():
         dPa_dP = WS.dPa_dP(method="numercial")  # Jacobian of means transformation # numerical or theoretical
         
         t_quats = WS.transform_quats(method="dPa_dP")  # dPa_dP, ray_angle
-        t_scales = WS.calc_transform_scales(comp_by="edges", comp_coeff="1/3")  # Scale correction
+        t_scales = WS.transform_scales(comp_by="edges", comp_coeff="1/3")  # Scale correction
         
         dSa_dS = WS.dSa_dS()  # Jacobian of scales transformation
         
@@ -92,22 +92,24 @@ class WaterSurface():
                  
                  # dPa_dP
                  delta_numercial_jacobian: float = 1e-4,
+                 both_sides: bool = True, # If True, calculate both plus and minus perturbations [TODO]
                  
                  # t_quats
                  method_transform_quats: str = "dPa_dP", # "dPa_dP" or "difference_ray_angle"
                  # t_scales
                  method_transform_scales: str = "edges", # "volume" or "edges" or "ray_length"
-                 coeff_transform_scales: float = 1/3,    # "1/2" or "1/3"
+                 coeff_transform_scales: float = 1/2,    # "1/2" or "1/3"
                  
     ):
-        self.n = torch.tensor(n, dtype=torch.float32, device=device, requires_grad=False)
-        self.plane = torch.tensor(plane, dtype=torch.float32, device=device, requires_grad=False)
+        self.n = torch.tensor(n, dtype=torch.float32, device=device, requires_grad=False).clone().detach()
+        self.plane = torch.tensor(plane, dtype=torch.float32, device=device, requires_grad=False).clone().detach()
         self.device = device
         
         self.method_solve_quartic = method_solve_quartic.lower()
         self.newton_iters = newton_iters
         self.newton_tol = newton_tol
         self.delta_numercial_jacobian = delta_numercial_jacobian
+        self.both_sides = both_sides
         self.method_transform_quats = method_transform_quats
         self.method_transform_scales = method_transform_scales
         self.method_coeff_transform_scales = coeff_transform_scales
@@ -254,20 +256,22 @@ class WaterSurface():
     ### ------------------------------
     
     def transform_quats(self,
-                             method: str = "dPa_dP", # "dPa_dP" or "ray_angle"
+                        method: str = "dPa_dP", # "dPa_dP" or "ray_angle"
+                        quat_multiply_order: str = "d_q->quats" # "d_q->quats" or "quats->d_q"
     ):
         """
         Calculate the apparent quaternion based on the method specified.
         """
+        self.quat_multiply_order = quat_multiply_order
         if method == "dPa_dP":
-            return self.calc_apparent_quaternion()
+            return self.calc_apparent_quaternion_by_dPa_dP()
         elif method == "ray_angle":
-            return self.calc_apparent_quaternion_by_difference_ray_angle()
+            return self.calc_apparent_quaternion_by_ray_angle()
         else:
             raise ValueError(f"Unknown method for calculating apparent quaternion: {method}")
     
     
-    def calc_apparent_quaternion(self,
+    def calc_apparent_quaternion_by_dPa_dP(self,
     ):
         """
         Calculate the apparent quaternion based on dPa/dP.
@@ -283,7 +287,6 @@ class WaterSurface():
         d_horizontal = torch.sqrt(d_ra[:, 0]**2 + d_ra[:, 1]**2)  # Horizontal component of the apparent direction
         
         theta = torch.atan2(d_vertical, d_horizontal)  # Calculate the angle of rotation
-        
         z_axis = torch.tensor([0, 0, 1], device=self.device, dtype=self.x.dtype).expand(self.num_g, 3)  # Z-axis for rotation
         
         horizontal_axis = torch.stack(
@@ -291,24 +294,32 @@ class WaterSurface():
             dim=1
         )
         # numercial stability
-        horizontal_axis *= 10.0
+        horizontal_axis *= 100.0
         
-        # cross
+        # cross product to find the axis of rotation
         axis = torch.cross(horizontal_axis, z_axis, dim=1)
         
-        # axis = torch.stack(
-            # [-self.means[:, 1], self.means[:, 0], torch.zeros_like(self.means[:, 0])],
-            # dim=1
-        # )
+        # Calculate the quaternion from axis and angle
+        d_q = quaternion_from_axis_angle(axis, theta) 
         
-        d_q = quaternion_from_axis_angle(axis, theta)  # Calculate the quaternion from axis and angle
         # Multiply the original quaternion with the delta quaternion
-        # new_quats = GaussianTransformUtils.quat_multiply(self.quats, d_q) # right  
-        new_quats = GaussianTransformUtils.quat_multiply(d_q, self.quats)  
-        print(theta)
-        
+        if self.quat_multiply_order == "d_q->quats":
+            new_quats = GaussianTransformUtils.quat_multiply(d_q, self.quats)
+        elif self.quat_multiply_order == "quats->d_q":
+            new_quats = GaussianTransformUtils.quat_multiply(self.quats, d_q)
+        else:
+            new_quats = GaussianTransformUtils.quat_multiply(d_q, self.quats)
         return new_quats
     
+    # [TODO]
+    def calc_apparent_quaternion_by_ray_angle(self,
+    ):
+        """
+        Calculate the apparent quaternion based on the angle of the ray.
+        """
+        raise NotImplementedError("Method 'calc_apparent_quaternion_by_ray_angle' is not implemented yet.")
+
+        
     ### ------------------------------
     ###        Calcurate Jacobian of refractive transformation
     ### ------------------------------    
@@ -333,28 +344,73 @@ class WaterSurface():
                 newton_tol=self.newton_tol,
                 delta_numercial_jacobian=self.delta_numercial_jacobian
             )
-            WS_minus = WaterSurface(
-                means=means_minus,
-                quats=self.quats,
-                scales=self.scales,
-                cam_center=self.cam_center,
-                n=self.n,
-                plane=self.plane,
-                method_solve_quartic=self.method_solve_quartic,
-                newton_iters=self.newton_iters,
-                newton_tol=self.newton_tol,
-                delta_numercial_jacobian=self.delta_numercial_jacobian
-            )
             
-            t_means_plus = WS_plus.transform_means()
-            t_means_minus = WS_minus.transform_means()
-            self.jacobian[:, :, i] = (t_means_plus - t_means_minus) / (2 * self.delta_numercial_jacobian)
+            if self.both_sides: # ここで分岐があととめっゃゃ遅くなるかも、、、そんなことないか? [TODO]
+                WS_minus = WaterSurface(
+                    means=means_minus,
+                    quats=self.quats,
+                    scales=self.scales,
+                    cam_center=self.cam_center,
+                    n=self.n,
+                    plane=self.plane,
+                    method_solve_quartic=self.method_solve_quartic,
+                    newton_iters=self.newton_iters,
+                    newton_tol=self.newton_tol,
+                    delta_numercial_jacobian=self.delta_numercial_jacobian
+                )
+
+                t_means_plus = WS_plus.transform_means()
+                t_means_minus = WS_minus.transform_means()
+                self.jacobian[:, :, i] = (t_means_plus - t_means_minus) / (2 * self.delta_numercial_jacobian)
+                
+            else:
+                t_means_plus = WS_plus.transform_means()
+                self.jacobian[:, :, i] = (t_means_plus - self.means) / self.delta_numercial_jacobian
             
         return self.jacobian
     
+    
+    
+    
+    
+    
     ### ------------------------------
-    ###       Collect apparent scales
+    ###        Calcurate SCALE corrected by quaternion
     ### ------------------------------
+    def transform_scales(self,
+                         method_transform_scales: str = None, # "volume" or "edges" or "ray_length"
+                         coeff_transform_scales: float = None,   # "1/3" seems theoretical, "1/2" seems empirical
+                         correct_space: str = "real" # "real" or "log"
+    ):
+        """
+        Calculate the apparent scales based on the method specified.
+        """
+        # if parameter is not specified, use the default value
+        if method_transform_scales is None:
+            method_transform_scales = self.method_transform_scales
+        if coeff_transform_scales is None:
+            coeff_transform_scales = self.method_coeff_transform_scales
+        
+        if method_transform_scales == "volume":
+            self.volume_correction_factor = self.calc_spatial_compression_by_volume()
+        elif method_transform_scales == "edges":
+            self.volume_correction_factor = self.calc_spatial_compression_by_edges()
+        elif method_transform_scales == "ray_length":
+            raise NotImplementedError("Method 'ray_length' is not implemented yet.")
+        else:
+            raise ValueError(f"Unknown method for calculating apparent scales: {method_transform_scales}")  
+        
+        if correct_space == "real":
+            scale_correction_factor = torch.pow(self.volume_correction_factor, coeff_transform_scales)  # (N,)
+            new_scales = scale_correction_factor.unsqueeze(-1) * self.scales  
+        elif correct_space == "log":
+            scale_correction_factor = torch.pow(self.volume_correction_factor, coeff_transform_scales)  # (N,)
+            logK = torch.log(self.scale_correction_factor_by_volume).unsqueeze(-1) # (N, 1)
+            new_scales = logK + self.scales 
+        else:
+            raise ValueError(f"Unknown space for scale correction: {correct_space}")
+        
+        return new_scales
     
     def calc_spatial_compression_by_volume(self,
     ):
@@ -364,16 +420,15 @@ class WaterSurface():
         # Ensure spatial compression have been computed
         if getattr(self, 'jacobian', None) is None:
             _ = self.dPa_dP()        
-        # d_xa = self.jacobian[:, 0, :]
-        # d_ya = self.jacobian[:, 1, :]
-        # d_za = self.jacobian[:, 2, :]
-        d_xa = self.jacobian[:, :, 0]
-        d_ya = self.jacobian[:, :, 1]
-        d_za = self.jacobian[:, :, 2]
+        d_xa = self.jacobian[:, :, 0] # ∂x'/∂x, ∂y'/∂x, ∂z'/∂x
+        d_ya = self.jacobian[:, :, 1] # ∂x'/∂y, ∂y'/∂y, ∂z'/∂y
+        d_za = self.jacobian[:, :, 2] # ∂x'/∂z, ∂y'/∂z, ∂z'/∂z
         
-        
+        # Calculate the volume of the parallelepiped formed by the three vectors
         cross_xy = torch.cross(d_xa, d_ya, dim=1)
-        self.volume_compression_ratio = torch.abs(torch.sum(d_za * cross_xy, dim=1)) # (N,)    
+        volume_correction_factor = torch.abs(torch.sum(cross_xy * d_za, dim=1))  # (N,)
+        
+        return volume_correction_factor
     
     def calc_spatial_compression_by_edges(self,
     ):
@@ -383,10 +438,7 @@ class WaterSurface():
         # Ensure spatial compression have been computed
         if getattr(self, 'jacobian', None) is None:
             _ = self.dPa_dP()       
-             
-        # d_xa = self.jacobian[:, 0, :]
-        # d_ya = self.jacobian[:, 1, :]
-        # d_za = self.jacobian[:, 2, :]
+            
         d_xa = self.jacobian[:, :, 0]
         d_ya = self.jacobian[:, :, 1]
         d_za = self.jacobian[:, :, 2]
@@ -395,58 +447,19 @@ class WaterSurface():
         edge_y = torch.norm(d_ya, dim=1)
         edge_z = torch.norm(d_za, dim=1) 
         
-        self.edge_compression_ratio = edge_x * edge_y * edge_z # (N,)
+        volume_correction_factor = edge_x * edge_y * edge_z # (N,)
              
-        
-    ### ------------------------------
-    ###        Calcurate SCALE corrected by quaternion
-    ### ------------------------------
+        return volume_correction_factor
     
-    def scale_correction_as_log(self,
+    def calc_spatial_compression_by_ray_length(self,
     ):
-        # Ensure spatial compression have been computed
-        if getattr(self, 'jacobian', None) is None:
-            _ = self.dPa_dP()
-        if getattr(self, 'volume_compression_ratio', None) is None:
-            self.calc_spatial_compression_by_volume()
+        """
+        変化率 Ray Lenght between camera center and apparent position of Gaussian center
+        """
+        raise NotImplementedError("Method 'calc_spatial_compression_by_ray_length' is not implemented yet.")
         
-        # calculate scale correction factor from volume compression rario
-        self.scale_correction_factor_by_volume = self.volume_compression_ratio**(1/2) # (N,)
-        logK = torch.log(self.scale_correction_factor_by_volume).unsqueeze(-1) # (N, 1)
-        self.new_scales = logK + self.scales 
-        return self.new_scales
+
     
-    def scale_correction_as_real(self,
-                                 comp_by: str = "volume" # "volume" or "edges"
-    ):
-        # Ensure spatial compression have been computed
-        if getattr(self, 'jacobian', None) is None:
-            _ = self.dPa_dP()
-            
-        if comp_by == "volume":
-            if getattr(self, 'volume_compression_ratio', None) is None:
-                self.calc_spatial_compression_by_volume()
-
-            # calculate scale correction factor from volume compression rario
-            self.scale_correction_factor_by_volume = self.volume_compression_ratio**(1/3) # (N,)
-            # self.scale_correction_factor = self.volume_compression_ratio**1 # (N,)
-            K = self.scale_correction_factor_by_volume.unsqueeze(-1) # (N, 1)
-            self.new_scales = K * self.scales 
-            return self.new_scales
-        
-        elif comp_by == "edges":
-            if getattr(self, 'edge_compression_ratio', None) is None:
-                self.calc_spatial_compression_by_edges()
-
-            # calculate scale correction factor from edge compression ratio
-            # self.scale_correction_factor_by_edges = self.edge_compression_ratio**(1/3)
-            # self.scale_correction_factor_by_edges = self.edge_compression_ratio**(1/2)
-            self.scale_correction_factor_by_edges = self.edge_compression_ratio
-            K = self.scale_correction_factor_by_edges.unsqueeze(-1) # (N, 1)
-            self.new_scales = K * self.scales
-            return self.new_scales
-        else:
-            raise ValueError("comp_by must be 'volume' or 'edges'.")
         
     
     # Rayの距離による補間 ← 3D空間が歪むことが原因のため、不適
@@ -479,237 +492,237 @@ class WaterSurface():
     ### -----------------------------------
     ###        Calcurate ray of each pixel
     ### -----------------------------------
-    def calc_ray_of_each_pixel(self, 
-    ):
+#     def calc_ray_of_each_pixel(self, 
+#     ):
         
-        fx, fy = self.K[0, 0], self.K[1, 1]
-        cx, cy = self.K[0, 2], self.K[1, 2]
+#         fx, fy = self.K[0, 0], self.K[1, 1]
+#         cx, cy = self.K[0, 2], self.K[1, 2]
     
-        # (H, W) indexing
-        v, u = torch.meshgrid(
-            torch.arange(0, self.height, device=self.device),
-            torch.arange(0, self.width, device=self.device),
-            indexing='ij'
-        )
+#         # (H, W) indexing
+#         v, u = torch.meshgrid(
+#             torch.arange(0, self.height, device=self.device),
+#             torch.arange(0, self.width, device=self.device),
+#             indexing='ij'
+#         )
     
-        self.rays = torch.stack([
-            (u - cx) / fx,
-            (v - cy) / fy,
-            torch.ones_like(u) 
-        ], dim=-1)  # (H, W, 3)
+#         self.rays = torch.stack([
+#             (u - cx) / fx,
+#             (v - cy) / fy,
+#             torch.ones_like(u) 
+#         ], dim=-1)  # (H, W, 3)
     
-        # Rotate ray directions to world coordinates
-        self.rays = torch.einsum('ij,hwj->hwi', self.camtoworld[:3, :3], self.rays) # (3, 3) @ (H, W, 3) -> (H, W, 3)
-        self.rays = self.rays / torch.norm(self.rays, dim=-1, keepdim=True)
+#         # Rotate ray directions to world coordinates
+#         self.rays = torch.einsum('ij,hwj->hwi', self.camtoworld[:3, :3], self.rays) # (3, 3) @ (H, W, 3) -> (H, W, 3)
+#         self.rays = self.rays / torch.norm(self.rays, dim=-1, keepdim=True)
     
-        # Expand camera origin
-        self.ray_origins = self.cam_center.view(1, 1, 3).expand(self.height, self.width, 3)
+#         # Expand camera origin
+#         self.ray_origins = self.cam_center.view(1, 1, 3).expand(self.height, self.width, 3)
         
-        return self.rays
+#         return self.rays
     
-    def calc_incidence_angle_of_rays(self,
-    ):
-        self.incidence_angle = torch.acos(torch.clamp(self.rays[:, :, 2], -1, 1))  # (H, W) tensor with angle in radians
+#     def calc_incidence_angle_of_rays(self,
+#     ):
+#         self.incidence_angle = torch.acos(torch.clamp(self.rays[:, :, 2], -1, 1))  # (H, W) tensor with angle in radians
         
     
-    ### -----------------------------------
-    ###        Environment map
-    ### -----------------------------------
-    def load_environment_map(self, 
-                             envmap_path: str = None,
-    ):
-        """
-        Load environment map for rendering.
-        """
-        format = envmap_path.split('.')[-1].lower() # lower() -> 小文字に
-        env_np = imageio.imread(envmap_path, format=format)
+#     ### -----------------------------------
+#     ###        Environment map
+#     ### -----------------------------------
+#     def load_environment_map(self, 
+#                              envmap_path: str = None,
+#     ):
+#         """
+#         Load environment map for rendering.
+#         """
+#         format = envmap_path.split('.')[-1].lower() # lower() -> 小文字に
+#         env_np = imageio.imread(envmap_path, format=format)
         
-        if env_np.dtype == np.uint8:
-            # 8-bit LDR image: map [0,255] → [0,1]
-            env_np = env_np.astype(np.float32) / 255.0 
-        else:
-            # exposure/gamma header you want to apply
-            exposure = 1.0
-            gammna = 2.2
+#         if env_np.dtype == np.uint8:
+#             # 8-bit LDR image: map [0,255] → [0,1]
+#             env_np = env_np.astype(np.float32) / 255.0 
+#         else:
+#             # exposure/gamma header you want to apply
+#             exposure = 1.0
+#             gammna = 2.2
             
-            hdr_exp = env_np * (2.0**exposure )
-            tonemap = hdr_exp ** (1.0 / gammna)
-            env_np = tonemap.astype(np.float32)
+#             hdr_exp = env_np * (2.0**exposure )
+#             tonemap = hdr_exp ** (1.0 / gammna)
+#             env_np = tonemap.astype(np.float32)
                         
         
-        self.env = torch.from_numpy(env_np).permute(2,0,1).unsqueeze(0).to(self.device) # (1, C, H, W)
+#         self.env = torch.from_numpy(env_np).permute(2,0,1).unsqueeze(0).to(self.device) # (1, C, H, W)
     
-    def get_colors_from_envmap(self, 
-                               rays: torch.Tensor = None,
-    ):
-        """
-        Get colors from environment map.
-        """
-        if not hasattr(self, 'env'):
-            raise ValueError("Environment map is not loaded. Please load it using `load_environment_map` method.")
+#     def get_colors_from_envmap(self, 
+#                                rays: torch.Tensor = None,
+#     ):
+#         """
+#         Get colors from environment map.
+#         """
+#         if not hasattr(self, 'env'):
+#             raise ValueError("Environment map is not loaded. Please load it using `load_environment_map` method.")
         
-        x, y, z = rays.unbind(dim=-1)
-        phi = torch.atan2(y, x)                           # [-pi, pi] # longitude
-        self.incidence_angle = torch.acos(torch.clamp(z, -1,1))          # [0, pi] # latitude
-        u = phi / (2*torch.pi) + 0.5                      # [0, 1]4
-        u = u % 1.0                                       # [0, 1]
-        v = self.incidence_angle / torch.pi               # [0, 1]
-        grid = torch.stack([2*u-1, 2*v-1], dim=-1)        # [−1,1]^2
+#         x, y, z = rays.unbind(dim=-1)
+#         phi = torch.atan2(y, x)                           # [-pi, pi] # longitude
+#         self.incidence_angle = torch.acos(torch.clamp(z, -1,1))          # [0, pi] # latitude
+#         u = phi / (2*torch.pi) + 0.5                      # [0, 1]4
+#         u = u % 1.0                                       # [0, 1]
+#         v = self.incidence_angle / torch.pi               # [0, 1]
+#         grid = torch.stack([2*u-1, 2*v-1], dim=-1)        # [−1,1]^2
 
-        N = self.width * self.height
-        grid = grid.view(1, N, 1, 2)
+#         N = self.width * self.height
+#         grid = grid.view(1, N, 1, 2)
         
-        C = self.env.shape[1]  # Number of channels in the environment map
-        sampled = F.grid_sample(self.env, grid, align_corners=True, mode="bilinear")
-        self.env_colors = sampled.view(C, N).permute(1,0).reshape(self.height, self.width, C)  # (H, W, C)
+#         C = self.env.shape[1]  # Number of channels in the environment map
+#         sampled = F.grid_sample(self.env, grid, align_corners=True, mode="bilinear")
+#         self.env_colors = sampled.view(C, N).permute(1,0).reshape(self.height, self.width, C)  # (H, W, C)
         
-        return self.env_colors[:,:,:3] if C == 4 else self.env_colors # (N, 3) tensor with RGB colors
+#         return self.env_colors[:,:,:3] if C == 4 else self.env_colors # (N, 3) tensor with RGB colors
     
     
-    ### -----------------------------------
-    ###        Refrection model
-    ### -----------------------------------
+#     ### -----------------------------------
+#     ###        Refrection model
+#     ### -----------------------------------
     
-    def calc_refrected_ray(self, 
-    ):
-        """
-        Calculate the refracted ray direction.
-        """
-        self.refrected_rays = self.rays.clone()
-        self.refrected_rays[:, :, 2] = - self.rays[:, :, 2]
-        return self.refrected_rays
+#     def calc_refrected_ray(self, 
+#     ):
+#         """
+#         Calculate the refracted ray direction.
+#         """
+#         self.refrected_rays = self.rays.clone()
+#         self.refrected_rays[:, :, 2] = - self.rays[:, :, 2]
+#         return self.refrected_rays
     
-    # def calc_refraction_angle_of_each_pixel(self,
-    # ):
-    #     """
-    #     Calculate the refraction angle of each pixel.
-    #     """
-    #     self.refraction_angle = torch.asin(torch.clamp(torch.sin(self.incidence_angle) / self.n, -1, 1))
+#     # def calc_refraction_angle_of_each_pixel(self,
+#     # ):
+#     #     """
+#     #     Calculate the refraction angle of each pixel.
+#     #     """
+#     #     self.refraction_angle = torch.asin(torch.clamp(torch.sin(self.incidence_angle) / self.n, -1, 1))
         
-    def schlick_fresnel_reflectance(self, 
-    ):
-        """
-        Calculate Fresnel reflectance using Schlick's approximation.
-        https://www.optics-words.com/kogaku_kiso/Frenel-equations.html
-        """
-        # specular reflectance, when the angle of incidence is 0
-        self.spec_refle_ratio = ((self.n - 1) / (self.n + 1)) ** 2
-        self.cos_theta_air = torch.clamp(-self.rays[:,:,2], -1, 1)  # cos(theta_i) for incidence angle
-        print(f"cos_theta_i:\n {self.cos_theta_air}")
-        self.spec_a2w = self.spec_refle_ratio + (1 - self.spec_refle_ratio) * (1 - self.cos_theta_air) ** 5
-        self.spec_a2w = torch.clamp(self.spec_a2w, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
-        self.trans_a2w = 1 - self.spec_a2w
+#     def schlick_fresnel_reflectance(self, 
+#     ):
+#         """
+#         Calculate Fresnel reflectance using Schlick's approximation.
+#         https://www.optics-words.com/kogaku_kiso/Frenel-equations.html
+#         """
+#         # specular reflectance, when the angle of incidence is 0
+#         self.spec_refle_ratio = ((self.n - 1) / (self.n + 1)) ** 2
+#         self.cos_theta_air = torch.clamp(-self.rays[:,:,2], -1, 1)  # cos(theta_i) for incidence angle
+#         print(f"cos_theta_i:\n {self.cos_theta_air}")
+#         self.spec_a2w = self.spec_refle_ratio + (1 - self.spec_refle_ratio) * (1 - self.cos_theta_air) ** 5
+#         self.spec_a2w = torch.clamp(self.spec_a2w, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+#         self.trans_a2w = 1 - self.spec_a2w
         
-        return self.spec_refle_ratio, self.spec_a2w, self.trans_a2w
+#         return self.spec_refle_ratio, self.spec_a2w, self.trans_a2w
         
-    def fresnel_reflectance(self, 
-    ):
-        """
-        Calculate Fresnel reflectance using the Fresnel equations.
-        http://marupeke296.com/DXPS_PS_No7_FresnelReflection.html
-        """
-        A = self.reci_n
-        B = self.cos_theta_air = torch.clamp(-self.rays[:, :, 2], -1, 1)  # cos(theta_i) for incidence angle
-        C = torch.sqrt(1 - (self.reci_n2 * (1 - self.cos_theta_air ** 2))) 
+#     def fresnel_reflectance(self, 
+#     ):
+#         """
+#         Calculate Fresnel reflectance using the Fresnel equations.
+#         http://marupeke296.com/DXPS_PS_No7_FresnelReflection.html
+#         """
+#         A = self.reci_n
+#         B = self.cos_theta_air = torch.clamp(-self.rays[:, :, 2], -1, 1)  # cos(theta_i) for incidence angle
+#         C = torch.sqrt(1 - (self.reci_n2 * (1 - self.cos_theta_air ** 2))) 
         
-        Rs = ((A*B - C) / (A*B + C))**2
-        Rp = ((A*C - B) / (A*C + B))**2
-        self.spec_ave = (Rs + Rp) / 2.0
-        self.spec_ave = torch.clamp(self.spec_ave, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+#         Rs = ((A*B - C) / (A*B + C))**2
+#         Rp = ((A*C - B) / (A*C + B))**2
+#         self.spec_ave = (Rs + Rp) / 2.0
+#         self.spec_ave = torch.clamp(self.spec_ave, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
         
-        self.trans_ave = 1 - self.spec_ave
+#         self.trans_ave = 1 - self.spec_ave
         
-        return self.spec_ave, self.trans_ave
+#         return self.spec_ave, self.trans_ave
 
     
     
-    def fresnel_water2air(self,
-    ):
-        # n_i = self.n
-        # n_t = 1.0       
+#     def fresnel_water2air(self,
+#     ):
+#         # n_i = self.n
+#         # n_t = 1.0       
         
-        n_i = 1.0
-        n_t = self.n
+#         n_i = 1.0
+#         n_t = self.n
         
-        self.cos_theta_air = torch.clamp(-self.rays[:, :, 2], -1, 1)
-        theta_air = torch.acos(self.cos_theta_air)  # angle in radians
+#         self.cos_theta_air = torch.clamp(-self.rays[:, :, 2], -1, 1)
+#         theta_air = torch.acos(self.cos_theta_air)  # angle in radians
         
-        sin_theta_t = torch.sin(theta_air) * n_i / n_t  # if this > 1, the ray must be
-        cos_theta_t = torch.sqrt(torch.clip(1 - sin_theta_t**2, 0, 1))
+#         sin_theta_t = torch.sin(theta_air) * n_i / n_t  # if this > 1, the ray must be
+#         cos_theta_t = torch.sqrt(torch.clip(1 - sin_theta_t**2, 0, 1))
         
-        rs = ((n_t*self.cos_theta_air - n_i*cos_theta_t)/(n_t*self.cos_theta_air + n_i*cos_theta_t))**2
-        rp = ((n_i*self.cos_theta_air - n_t*cos_theta_t)/(n_i*self.cos_theta_air + n_t*cos_theta_t))**2
-        reflectance = (rs + rp) / 2       
+#         rs = ((n_t*self.cos_theta_air - n_i*cos_theta_t)/(n_t*self.cos_theta_air + n_i*cos_theta_t))**2
+#         rp = ((n_i*self.cos_theta_air - n_t*cos_theta_t)/(n_i*self.cos_theta_air + n_t*cos_theta_t))**2
+#         reflectance = (rs + rp) / 2       
         
-        self.spec_w2a = torch.where(sin_theta_t > 1, 1.0, reflectance)  # Use Rs for incidence and Rp for transmission
-        self.spec_w2a = torch.clamp(self.spec_w2a, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
-        self.trans_w2a = 1.0 - self.spec_w2a
-        return self.spec_w2a, self.trans_w2a
+#         self.spec_w2a = torch.where(sin_theta_t > 1, 1.0, reflectance)  # Use Rs for incidence and Rp for transmission
+#         self.spec_w2a = torch.clamp(self.spec_w2a, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+#         self.trans_w2a = 1.0 - self.spec_w2a
+#         return self.spec_w2a, self.trans_w2a
     
-    def fresnel_air2water(self,
-    ):
-        # specular reflectance, when the angle of incidence is 0
-        r0 = ((self.n - 1) / (self.n + 1)) ** 2
-        self.cos_theta_air = torch.clamp(-self.rays[:,:,2], -1, 1)  # cos(theta_i) for incidence angle
-        self.spec_a2w = r0 + (1 - self.spec_refle_ratio) * (1 - self.cos_theta_air) ** 5
-        self.spec_a2w = torch.clamp(self.spec_a2w, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
-        self.trans_a2w = 1 - self.spec_a2w
+#     def fresnel_air2water(self,
+#     ):
+#         # specular reflectance, when the angle of incidence is 0
+#         r0 = ((self.n - 1) / (self.n + 1)) ** 2
+#         self.cos_theta_air = torch.clamp(-self.rays[:,:,2], -1, 1)  # cos(theta_i) for incidence angle
+#         self.spec_a2w = r0 + (1 - self.spec_refle_ratio) * (1 - self.cos_theta_air) ** 5
+#         self.spec_a2w = torch.clamp(self.spec_a2w, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+#         self.trans_a2w = 1 - self.spec_a2w
         
-        return self.spec_a2w, self.trans_a2w
+#         return self.spec_a2w, self.trans_a2w
         
     
-    def fresnel_water2air_(self,
-    ):
-        n_w = self.n
-        n_a = 1.0
+#     def fresnel_water2air_(self,
+#     ):
+#         n_w = self.n
+#         n_a = 1.0
         
-        cos_theta_w = torch.clamp(-self.rays[:, :, 2], -1, 1)
-        print(f"cos_theta_w:\n {cos_theta_w.shape}")
-        theta_w = torch.acos(cos_theta_w)  # angle in radians
-        print(f"theta_w:\n {theta_w.shape}")
+#         cos_theta_w = torch.clamp(-self.rays[:, :, 2], -1, 1)
+#         print(f"cos_theta_w:\n {cos_theta_w.shape}")
+#         theta_w = torch.acos(cos_theta_w)  # angle in radians
+#         print(f"theta_w:\n {theta_w.shape}")
         
-        sin_theta_a = torch.sin(theta_w) * n_w / n_a  # if this > 1, the ray must be 全反射
-        cos_theta_i = torch.sqrt(torch.clip(1 - sin_theta_a**2, 0, 1))
-        print(f"sin_theta_a:\n {sin_theta_a.shape}")
+#         sin_theta_a = torch.sin(theta_w) * n_w / n_a  # if this > 1, the ray must be 全反射
+#         cos_theta_i = torch.sqrt(torch.clip(1 - sin_theta_a**2, 0, 1))
+#         print(f"sin_theta_a:\n {sin_theta_a.shape}")
         
-        rs = ((n_a*cos_theta_w - n_w*cos_theta_i)/(n_a*cos_theta_w + n_w*cos_theta_i))**2
-        rp = ((n_w*cos_theta_w - n_a*cos_theta_i)/(n_w*cos_theta_w + n_a*cos_theta_i))**2
-        print(f"rs:\n {rs.shape},\n rp:\n {rp.shape}")
-        reflectance = (rs + rp) / 2.0
-        print(f"reflectance:\n {reflectance.shape}")
-        reflectance = reflectance.clamp(min=0, max=1) # (H, W)
-        print(f"reflectance:\n {reflectance.shape}")
+#         rs = ((n_a*cos_theta_w - n_w*cos_theta_i)/(n_a*cos_theta_w + n_w*cos_theta_i))**2
+#         rp = ((n_w*cos_theta_w - n_a*cos_theta_i)/(n_w*cos_theta_w + n_a*cos_theta_i))**2
+#         print(f"rs:\n {rs.shape},\n rp:\n {rp.shape}")
+#         reflectance = (rs + rp) / 2.0
+#         print(f"reflectance:\n {reflectance.shape}")
+#         reflectance = reflectance.clamp(min=0, max=1) # (H, W)
+#         print(f"reflectance:\n {reflectance.shape}")
         
-        reflectance = reflectance 
+#         reflectance = reflectance 
         
-        # when sin_theta_a > 1, the ray must be 全反射
-        spec = torch.where(sin_theta_a > 1, torch.ones_like(reflectance), reflectance).unsqueeze(-1)
-        print(f"spec:\n {spec.shape}")
+#         # when sin_theta_a > 1, the ray must be 全反射
+#         spec = torch.where(sin_theta_a > 1, torch.ones_like(reflectance), reflectance).unsqueeze(-1)
+#         print(f"spec:\n {spec.shape}")
             
-        trans = 1.0 - spec
-        print(f"spec:\n {spec.shape}")
+#         trans = 1.0 - spec
+#         print(f"spec:\n {spec.shape}")
         
-        return spec, trans
+#         return spec, trans
         
-        # spec = fresnel_ref(
-        #     n_i=n_w,
-        #     n_t=n_a,
-        #     cos_theta_i=cos_theta_i,
-        #     cos_theta_t=self.cos_theta_w
-        # )
+#         # spec = fresnel_ref(
+#         #     n_i=n_w,
+#         #     n_t=n_a,
+#         #     cos_theta_i=cos_theta_i,
+#         #     cos_theta_t=self.cos_theta_w
+#         # )
           
-        # self.spec_w2a = torch.clamp(spec, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
-        # self.trans_w2a = 1.0 - self.spec_w2a
-        # return self.spec_w2a, self.trans_w2a
+#         # self.spec_w2a = torch.clamp(spec, min=0, max=1).unsqueeze(-1)  # (H, W, 1)
+#         # self.trans_w2a = 1.0 - self.spec_w2a
+#         # return self.spec_w2a, self.trans_w2a
     
-def fresnel_ref(
-    n_i: float,
-    n_t: float,
-    cos_theta_i: torch.Tensor,
-    cos_theta_t: torch.Tensor,
-):
-    rs = ((n_i * cos_theta_i - n_t * cos_theta_t) / (n_i * cos_theta_i + n_t * cos_theta_t)) ** 2
-    rp = ((n_t * cos_theta_i - n_i * cos_theta_t) / (n_t * cos_theta_i + n_i * cos_theta_t)) ** 2
-    reflectance = (rs + rp) / 2.0
+# def fresnel_ref(
+#     n_i: float,
+#     n_t: float,
+#     cos_theta_i: torch.Tensor,
+#     cos_theta_t: torch.Tensor,
+# ):
+#     rs = ((n_i * cos_theta_i - n_t * cos_theta_t) / (n_i * cos_theta_i + n_t * cos_theta_t)) ** 2
+#     rp = ((n_t * cos_theta_i - n_i * cos_theta_t) / (n_t * cos_theta_i + n_i * cos_theta_t)) ** 2
+#     reflectance = (rs + rp) / 2.0
     
-    return reflectance
+#     return reflectance
