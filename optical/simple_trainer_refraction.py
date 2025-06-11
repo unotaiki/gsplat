@@ -99,7 +99,7 @@ class Config:
     # Number of training steps   
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [1_000, 7_000, 15_000, 22_000, Config.max_steps])
+    eval_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, 22_000, Config.max_steps])
     # eval_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
@@ -211,6 +211,12 @@ class Config:
     method_transform_scales: str = "edges" # "volume" or "edges" or "ray_length"
     coeff_transform_scales: float = 1/3     # "1/2" or "1/3" or any float value
     scale_correct_space: str = "log"  # "real" or "log" 
+    
+    large_scale_reg_threshold: float = 3.0 # if 0.0, no large scale gaussians regularization
+    large_scale_reg_sharpness: float = 2.0 # sharpness of tanh 
+    large_scale_reg: float = 0.01  # regularization weight for large scale Gaussians
+    
+    z_positive_reg: float = 0.1  # regularization weight for Gaussians with positive z coordinate (floater)
     
     # Strategy
     # ADC
@@ -528,20 +534,24 @@ class Runner:
             self.cfg.n,
             self.cfg.plane,
             
+            self.cfg.flag_transform_quats,
+            self.cfg.flag_transform_scales,
+
             self.cfg.method_solve_quartic,
             self.cfg.newton_iters,
             self.cfg.newton_tol,
-            
+
             self.cfg.delta_numerical_jacobian,
             self.cfg.both_sides,
             self.cfg.method_transform_quats,
             self.cfg.method_transform_scales,
             self.cfg.coeff_transform_scales,
             self.cfg.scale_correct_space,
-        )       
-
-        # ラスタライズ
-        t_scales_real = torch.exp(t_scales)          # [N, 3] 学習はlog空間で行われる
+        )   
+        
+        if self.cfg.flag_transform_scales:    
+            # ラスタライズ
+            t_scales_real = torch.exp(t_scales)          # [N, 3] 学習はlog空間で行われる
         
         opacities = torch.sigmoid(self.splats["opacities"])  # [N]
         
@@ -588,7 +598,7 @@ class Runner:
         # Dump cfg.
         if world_rank == 0:
             with open(f"{cfg.result_dir}/cfg.yml", "w") as f:
-                yaml.dump(vars(cfg), f)
+                yaml.dump(vars(cfg), f, sort_keys=False)
 
         max_steps = cfg.max_steps
         init_step = 0
@@ -715,7 +725,27 @@ class Runner:
             )
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
             
-
+            
+            # regularization for too large Gaussian
+            if cfg.large_scale_reg_threshold != 0.0:
+                real_scales = torch.exp(self.splats["scales"])  # [N, 3]
+                over_scales = torch.tanh(cfg.large_scale_reg_sharpness * (real_scales - cfg.large_scale_reg_threshold))
+                penalty = torch.clamp_min(over_scales, 0.0)  # [N, 3]
+                loss = (
+                    loss
+                    + cfg.large_scale_reg * penalty.sum()  
+                )
+            
+            # regularization for Gaussians with positive z coordinate (floater)
+            if cfg.z_positive_reg > 0.0:
+                z_coords = self.splats["means"][:, 2]
+                positive_z_value = F.relu(z_coords)  # [N,]
+                loss = (
+                    loss
+                    + cfg.z_positive_reg * torch.mean(positive_z_value**2)  # [N,]
+                )
+            
+                
             # regularizations
             if cfg.opacity_reg > 0.0:
                 loss = (
