@@ -48,10 +48,9 @@ from gsplat.utils import save_ply
 
 
 # function to transform Gaussians location for Refraction Rasterization
-from refraction_utils_torch import culling_points_torch
-from refraction_transform import Refraction
-from torch.autograd import gradcheck
-from torchviz import make_dot
+from surface_2 import TransformWaterSurface
+
+
 
 ### ======== Config クラス – 設定オブジェクト ======== ###
 # Gaussian Splattingのトレーニングや評価に使うパラメータ群をまとめている設定用のデータクラス
@@ -69,15 +68,15 @@ class Config:
     render_traj_path: str = "ellipse"
 
     # Path to the Mip-NeRF 360 dataset
-    refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_with-refraction"))
-    non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_wo-refraction"))
-    # refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1_FOV70", "river_FOV70_REF"))
-    # non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1_FOV70", "river_FOV70_woREF"))
-    # Downsample factor for the dataset
+    # refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_with-refraction"))
+    # non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_wo-refraction"))
+    refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river2", "refraction"))
+    non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river2", "wo_refraction"))# Downsample factor for the dataset
+
     data_factor: int = 4
     # Directory to save results
     datetime = time.strftime("%Y-%m%d_%H-%M")
-    result_dir: str = f"results/{datetime}_{os.path.basename(refraction_dir)}" 
+    result_dir: str = f"results/0610/{datetime}_{os.path.basename(refraction_dir)}" 
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -100,14 +99,14 @@ class Config:
     # Number of training steps   
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, 22_000, Config.max_steps])
+    eval_steps: List[int] = field(default_factory=lambda: [1_000, 7_000, 15_000, 22_000, Config.max_steps])
     # eval_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, Config.max_steps])
+    save_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
     # Whether to save ply file (storage size can be large)
     save_ply: bool = True
     # Steps to save the model as ply
-    ply_steps: List[int] = field(default_factory=lambda: [7_000, Config.max_steps])
+    ply_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
 
     # Initialization strategy   # "sfm" または "random", "river"のいずれか
     init_type: str = "river"
@@ -150,7 +149,7 @@ class Config:
     # Opacity regularization (default:0.0, mcmc:0.01)
     opacity_reg: float = 0.01
     # Scale regularization (default:0.0, mcmc:0.01)
-    scale_reg: float = 0.01
+    scale_reg: float = 0.05
 
     # Enable camera optimization.
     pose_opt: bool = False
@@ -190,31 +189,35 @@ class Config:
     
     ### ========= ADDED ============ ###
     
-    # initialize river
+    # initialize river  
     num_init_points: int = 1e4
     
     # Refraction
-    flag_refraction: bool = True
+    flag_refraction: bool = True                                    
     n: float = 1.33 # refractive index
     plane: float = 0.0 # refractive plane (to z axis)
     atol: float = 1e-8 # tolerance for refraction calculation
     init_depth: float = -20.0
-    use_custom_ste: bool = True
     
-    num_iter_newtom: int = 8 # ニュートン法の反復回数を制御
-    tol_newton: float = 1e-3  # ニュートン法の精度
+    method_solve_quartic: str = "newton" # "newton" or "ferrari"
+    newton_iters: int = 10
+    newton_tol: float = 1e-6
+    delta_numerical_jacobian: float = 1e-4
+    both_sides: bool = True
+    
+    flag_transform_quats: bool = True  # Whether to transform quaternions during refraction rasterization
+    flag_transform_scales: bool = True  # Whether to transform scales during refraction rasterization
+    method_transform_quats: str = "dPa_dP"  # "dPa_dP" or "ray_angle"
+    method_transform_scales: str = "edges" # "volume" or "edges" or "ray_length"
+    coeff_transform_scales: float = 1/3     # "1/2" or "1/3" or any float value
+    scale_correct_space: str = "log"  # "real" or "log" 
     
     # Strategy
     # ADC
     prune_opa: float = 0.1
-    # MCMC
+    # MCMC 
     ratio_increase_new_gs: float = 1.05
-    reset_every: int = 2000
-    prune_opa: float = 0.005
-    prune_large_gs: bool = True
-    prune_scale3d: float = 3.0
-    prune_scale2d: float = 0.15
-    refine_scale2d_stop_iter: int = 0
+
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -511,91 +514,47 @@ class Runner:
         Ks: Tensor,
         width: int,
         height: int,
-        use_custom_ste: bool = True,
-        n: float = 1.33, 
-        plane: float = 0, 
-        num_iters_newton: int = 10,   # ニュートン法の反復回数を制御
-        tol_newton: float = 1e-6,     # ニュートン法の精度
         masks: Optional[Tensor] = None,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         
         
-        cam_center = camtoworlds[0, :3, 3]  # [C, 3]
-        
-        # # Mask for applying refraction
-        # # Culling (Get the points that are in the camera frustum)
-        # with torch.no_grad():
-        #     mask_culling = culling_points_torch(
-        #         self.splats["means"],
-        #         torch.inverse(camtoworlds),
-        #         Ks,
-        #         width=width,
-        #         height=height,
-        #     )
-        #     # 屈折面の後方にあるGaussianを選択
-        #     mask_below_surface = (self.splats["means"][:, 2] < plane)
-        #     # Combine the masks
-        #     mask = mask_culling & mask_below_surface
-        # # mask to float tensor
-        # mask_f = mask.float().unsqueeze(-1) 
-        
-        # ===== New Implementation =====
-        
-        # 全要素に対して変換を適用（マスクで重み付け）
-        # transformed_means, transformed_quats = RefractionSTE.apply(
-        transformed_means, transformed_quats = Refraction.apply(
+        # 全要素に対して変換を適用
+        t_means, t_quats, t_scales = TransformWaterSurface.apply(
             self.splats["means"],
             self.splats["quats"],
-            cam_center,
-            n,
-            plane
+            self.splats["scales"],
+            camtoworlds[0],
+            self.cfg.n,
+            self.cfg.plane,
+            
+            self.cfg.method_solve_quartic,
+            self.cfg.newton_iters,
+            self.cfg.newton_tol,
+            
+            self.cfg.delta_numerical_jacobian,
+            self.cfg.both_sides,
+            self.cfg.method_transform_quats,
+            self.cfg.method_transform_scales,
+            self.cfg.coeff_transform_scales,
+            self.cfg.scale_correct_space,
         )       
-        
-        # refractive_means = (
-        #     self.splats["means"] * (1 - mask_f) + transformed_means * mask_f
-        # ) 
-        
-        # refractive_quats = (
-        #     self.splats["quats"] * (1 - mask_f) + transformed_quats * mask_f
-        # )
-        
-        # # ===== Old Imoplementation =====
-        
-        # # Apply transformation
-        # transformed_means, transformed_quats = RefractionSTE.apply(
-        #     self.splats["means"][mask],
-        #     self.splats["quats"][mask],
-        #     cam_center,
-        #     n,
-        #     plane,
-        #     num_iters_newton,
-        #     tol_newton
-        # )
-        
-        # # Recreate the splats with transformed means
-        # refractive_means = torch.zeros_like(self.splats["means"])
-        # refractive_means[mask] = transformed_means
-        # refractive_means[~mask] = self.splats["means"][~mask]
-        
-        # # Recreate the splats with transformed quats
-        # refractive_quats = torch.zeros_like(self.splats["quats"])
-        # refractive_quats[mask] = transformed_quats
-        # refractive_quats[~mask] = self.splats["quats"][~mask]
-        
-        
-        # # ===========
 
-        # 以下、ラスタライズ
-        scales = torch.exp(self.splats["scales"])          # [N, 3]
+        # ラスタライズ
+        t_scales_real = torch.exp(t_scales)          # [N, 3] 学習はlog空間で行われる
+        
         opacities = torch.sigmoid(self.splats["opacities"])  # [N]
-        colors = torch.cat([self.splats["sh0"], self.splats["shN"]], dim=1)  # [N, K, 3]
+        
+        if cfg.sh_degree == 0:
+            colors = self.splats["sh0"].squeeze()  # [N, 1, 3]
+        else:
+            colors = torch.cat([self.splats["sh0"], self.splats["shN"]], dim=1)  # [N, K, 3]
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         render_colors, render_alphas, info = rasterization(
-            means=transformed_means,
-            quats=transformed_quats,
-            scales=scales,
+            means=t_means,
+            quats=t_quats if self.cfg.flag_transform_quats else self.splats["quats"],  
+            scales=t_scales_real if self.cfg.flag_transform_scales else torch.exp(self.splats["scales"]),  # [N, 3]
             opacities=opacities,
             colors=colors,
             viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
@@ -711,14 +670,6 @@ class Runner:
                     Ks=Ks,
                     width=width,
                     height=height,
-                    use_custom_ste=cfg.use_custom_ste,
-                    n=cfg.n,
-                    plane=cfg.plane,
-                    num_iters_newton=cfg.num_iter_newtom,   # [TODO] i dont know what to do
-                    tol_newton=cfg.tol_newton,
-                    sh_degree=sh_degree_to_use,
-                    near_plane=cfg.near_plane,
-                    far_plane=cfg.far_plane,
                     render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                     masks=masks,
                 )
@@ -777,20 +728,6 @@ class Runner:
                     loss
                     + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean() # scales は exp で復元
                 )
-                
-            # if step == 300:
-            #     # check param is tenser
-            #     for k, v in self.splats.items():
-            #         print(f'{k} : {v.type()}')
-            #         # print(f'grad : {v.grad}')
-            #         # print(f'grad is leaf : {v.grad.is_leaf}')
-            #         # print(f'requires grad : {v.requires_grad}')
-            #     image = make_dot(
-            #         loss,
-            #         params={k: v for k, v in self.splats.items() if v is not None}
-            #     )
-            #     image.format = "png"
-            #     image.render("graph")
 
             loss.backward()
             
@@ -942,10 +879,16 @@ class Runner:
                 # Update the scene.
                 self.viewer.update(step, num_train_rays_per_step)
 
+
     @torch.no_grad()
     def eval(self, step: int, stage: str = "val"):
         """Entry for evaluation."""
         print("Running evaluation...")
+        # Create output directory for evaluation results.
+        os.makedirs(
+            f"{self.render_refraction_dir}/{step:05d}",
+            exist_ok=True,
+        )
         cfg = self.cfg
         device = self.device
         world_rank = self.world_rank
@@ -953,68 +896,90 @@ class Runner:
         valloader = torch.utils.data.DataLoader(
             self.valset, batch_size=1, shuffle=False, num_workers=1
         )
+        trainloader = torch.utils.data.DataLoader(
+            self.trainset, batch_size=1, shuffle=False, num_workers=1
+        )
         ellipse_time = 0
         metrics = defaultdict(list)
-        for i, data in enumerate(valloader):
+        
+        for i, data in enumerate(valloader):            
             camtoworlds = data["camtoworld"].to(device)
             Ks = data["K"].to(device)
-            pixels = data["image"].to(device) / 255.0
+            
+            pixels_val = data["image"].to(device) / 255.0
+            pixels_train = trainloader.dataset[i]["image"].to(device).unsqueeze(0) / 255.0
+            
             masks = data["mask"].to(device) if "mask" in data else None
-            height, width = pixels.shape[1:3]
+            height, width = pixels_val.shape[1:3]
 
             torch.cuda.synchronize()
             tic = time.time()
             # If refracted images are trained, render trained scene without refraction, 
-            # and compare with non-refraction images
-            if cfg.flag_refraction:
-                colors, _, _ = self.rasterize_splats(
-                # colors, _, _ = self.rasterize_splats(
-                    camtoworlds=camtoworlds,
-                    Ks=Ks,
-                    width=width,
-                    height=height,
-                    sh_degree=cfg.sh_degree,
-                    near_plane=cfg.near_plane,
-                    far_plane=cfg.far_plane,
-                    masks=masks,
-                )  # [1, H, W, 3] 
-            # if non-refraction images are trained, render trained scene with refraction,
-            # and compare with refracted images
-            else:           
-                colors, _, _ = self.rasterize_splats_with_refraction(
-                    camtoworlds=camtoworlds,
-                    Ks=Ks,
-                    width=width,
-                    height=height,
-                    sh_degree=cfg.sh_degree,
-                    near_plane=cfg.near_plane,
-                    far_plane=cfg.far_plane,
-                    masks=masks,
-                )  # [1, H, W, 3]         
+            # and compare with non-refraction images      
+            refractive_colors, _, _ = self.rasterize_splats_with_refraction(
+                camtoworlds=camtoworlds,
+                Ks=Ks,
+                width=width,
+                height=height,
+                masks=masks,
+            )  # [1, H, W, 3]
+            non_refractive_colors, _, _ = self.rasterize_splats(
+                camtoworlds=camtoworlds,
+                Ks=Ks,
+                width=width,
+                height=height,
+                sh_degree=cfg.sh_degree,
+                near_plane=cfg.near_plane,
+                far_plane=cfg.far_plane,
+                masks=masks,
+            )         
             torch.cuda.synchronize()
             ellipse_time += time.time() - tic
 
-            colors = torch.clamp(colors, 0.0, 1.0)
-            canvas_list = [pixels, colors]
+            refractive_colors = torch.clamp(refractive_colors, 0.0, 1.0)
+            non_refractive_colors = torch.clamp(non_refractive_colors, 0.0, 1.0)
+            
+            if cfg.flag_refraction:
+                row_ref = torch.cat(
+                    [pixels_train, refractive_colors], dim=2
+                )
+                row_non_ref = torch.cat(
+                    [pixels_val, non_refractive_colors], dim=2
+                )
+            else:
+                row_ref = torch.cat(
+                    [pixels_val, refractive_colors], dim=2
+                )
+                row_non_ref = torch.cat(
+                    [pixels_train, non_refractive_colors], dim=2
+                )
+            canvas_list = torch.cat(
+                [row_ref, row_non_ref], dim=1)
 
             if world_rank == 0:
                 # write images
-                canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+                canvas = canvas_list.squeeze(0).detach().cpu().numpy()
                 canvas = (canvas * 255).astype(np.uint8)
+
                 imageio.imwrite(
-                    f"{self.render_refraction_dir}/{stage}_step{step}_{i:04d}.png",
+                    f"{self.render_refraction_dir}/{step:05d}/{stage}_step{step}_{i:04d}.png",
                     canvas,
                 )
 
-                pixels_p = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
-                colors_p = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
-                metrics["psnr"].append(self.psnr(colors_p, pixels_p))
-                metrics["ssim"].append(self.ssim(colors_p, pixels_p))
-                metrics["lpips"].append(self.lpips(colors_p, pixels_p))
+                GT_w_ref = pixels_train.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                render_w_ref = refractive_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                GT_wo_ref = pixels_val.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                render_wo_ref = non_refractive_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                metrics["psnr-w/-ref"].append(self.psnr(render_w_ref, GT_w_ref))
+                metrics["ssim-w/-ref"].append(self.ssim(render_w_ref, GT_w_ref))
+                metrics["lpips-w/-ref"].append(self.lpips(render_w_ref, GT_w_ref))
+                metrics["psnr-w/o-ref"].append(self.psnr(render_wo_ref, GT_wo_ref))
+                metrics["ssim-w/o-ref"].append(self.ssim(render_wo_ref, GT_wo_ref))
+                metrics["lpips-w/o-ref"].append(self.lpips(render_wo_ref, GT_wo_ref))                
                 if cfg.use_bilateral_grid:
-                    cc_colors = color_correct(colors, pixels)
+                    cc_colors = color_correct(refractive_colors, pixels_val)
                     cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
-                    metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
+                    metrics["cc_psnr"].append(self.psnr(cc_colors_p, GT_w_ref))
 
         if world_rank == 0:
             ellipse_time /= len(valloader)
@@ -1027,7 +992,8 @@ class Runner:
                 }
             )
             print(
-                f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, LPIPS: {stats['lpips']:.3f} "
+                f"PSNR-w/-ref: {stats['psnr-w/-ref']:.3f}, SSIM-w/-ref: {stats['ssim-w/-ref']:.4f}, LPIPS-w/-ref: {stats['lpips-w/-ref']:.3f}\n"
+                f"PSNR-w/o-ref: {stats['psnr-w/o-ref']:.3f}, SSIM-w/o-ref: {stats['ssim-w/o-ref']:.4f}, LPIPS-w/o-ref: {stats['lpips-w/o-ref']:.3f}\n"
                 f"Time: {stats['ellipse_time']:.3f}s/image "
                 f"Number of GS: {stats['num_GS']}"
             )
@@ -1038,6 +1004,8 @@ class Runner:
             for k, v in stats.items():
                 self.writer.add_scalar(f"{stage}/{k}", v, step)
             self.writer.flush()
+
+
 
     @torch.no_grad()
     def render_traj(self, step: int):
@@ -1089,7 +1057,7 @@ class Runner:
             camtoworlds = camtoworlds_all[i : i + 1]
             Ks = K[None]
 
-            renders, _, _ = self.rasterize_splats(
+            renders_wo_ref, _, _ = self.rasterize_splats(
                 camtoworlds=camtoworlds,
                 Ks=Ks,
                 width=width,
@@ -1099,13 +1067,32 @@ class Runner:
                 far_plane=cfg.far_plane,
                 render_mode="RGB+ED",
             )  # [1, H, W, 4]
-            colors = torch.clamp(renders[..., 0:3], 0.0, 1.0)  # [1, H, W, 3]
-            depths = renders[..., 3:4]  # [1, H, W, 1]
-            depths = (depths - depths.min()) / (depths.max() - depths.min())
-            canvas_list = [colors, depths.repeat(1, 1, 1, 3)]
+            renders_w_ref, _, _ = self.rasterize_splats_with_refraction(
+                camtoworlds=camtoworlds,
+                Ks=Ks,
+                width=width,
+                height=height,
+                # sh_degree=cfg.sh_degree,
+                near_plane=cfg.near_plane,
+                far_plane=cfg.far_plane,
+                render_mode="RGB+ED",                
+            )  # [1, H, W, 3]            
+            colors_wo_ref = torch.clamp(renders_wo_ref[..., 0:3], 0.0, 1.0)  # [1, H, W, 3]
+            depths_wo_ref = renders_wo_ref[..., 3:4]  # [1, H, W, 1]
+            depths_wo_ref = (depths_wo_ref - depths_wo_ref.min()) / (depths_wo_ref.max() - depths_wo_ref.min())
+            canvas_list_wo_ref = [colors_wo_ref, depths_wo_ref.repeat(1, 1, 1, 3)]
+            
+            colors_w_ref = torch.clamp(renders_w_ref[..., 0:3], 0.0, 1.0)  # [1, H, W, 3]
+            depths_w_ref = renders_w_ref[..., 3:4]  # [1, H, W, 1]
+            depths_w_ref = (depths_w_ref - depths_w_ref.min()) / (depths_w_ref.max() - depths_w_ref.min())
+            canvas_list_w_ref = [colors_w_ref, depths_w_ref.repeat(1, 1, 1, 3)]
 
             # write images
-            canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+            canvas_wo_ref = torch.cat(canvas_list_wo_ref, dim=2)
+            canvas_w_ref = torch.cat(canvas_list_w_ref, dim=2)
+            canvas = torch.cat([canvas_wo_ref, canvas_w_ref], dim=1)  # [1, H, W*2, 3]
+            canvas = canvas.squeeze(0).detach().cpu().numpy()  # [H, W*2, 3]
+            
             canvas = (canvas * 255).astype(np.uint8)
             writer.append_data(canvas)
         writer.close()
@@ -1213,12 +1200,6 @@ if __name__ == "__main__":
                 scale_reg=Config.scale_reg,
                 strategy=MCMCStrategy(verbose=True,
                                       ratio_increase_new_gs=Config.ratio_increase_new_gs,
-                                      prune_every=Config.reset_every,
-                                      prune_opa=Config.prune_opa,
-                                      prune_large_gs=Config.prune_large_gs,
-                                      prune_scale3d=Config.prune_scale3d,
-                                      prune_scale2d=Config.prune_scale2d,
-                                      refine_scale2d_stop_iter=Config.refine_scale2d_stop_iter,
                                       ),
             ),
         ),

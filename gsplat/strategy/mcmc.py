@@ -53,9 +53,9 @@ class MCMCStrategy(Strategy):
     refine_every: int = 100
     min_opacity: float = 0.005
     verbose: bool = False
+    ratio_increase_new_gs: float = 1.05
     
     # Our implementation
-    ratio_increase_new_gs: float = 1.05
     prune_every: int = 2000
     
     prune_opa: float = 0.005
@@ -214,23 +214,23 @@ class MCMCStrategy(Strategy):
 
     
 
-    @torch.no_grad()
-    def _prune_gs(
-        self,
-        params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
-        optimizers: Dict[str, torch.optim.Optimizer],
-        state: Dict[str, Any],
-        step: int,
-    ) -> int:
+    # @torch.no_grad()
+    # def _prune_gs(
+    #     self,
+    #     params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
+    #     optimizers: Dict[str, torch.optim.Optimizer],
+    #     state: Dict[str, Any],
+    #     step: int,
+    # ) -> int:
         
-        is_too_big = (
-            torch.exp(params["scales"]).max(dim=-1).values
-            > self.prune_scale3d 
-        )
+    #     is_too_big = (
+    #         torch.exp(params["scales"]).max(dim=-1).values
+    #         > self.prune_scale3d 
+    #     )
         
         
-        n_prune = is_too_big.sum().item()
-        if n_prune > 0:
-            remove(params=params, optimizers=optimizers, state=state, mask=is_too_big)
+    #     n_prune = is_too_big.sum().item()
+    #     if n_prune > 0:
+    #         remove(params=params, optimizers=optimizers, state=state, mask=is_too_big)
 
-        return n_prune
+    #     return n_prune
