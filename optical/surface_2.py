@@ -176,7 +176,7 @@ class WaterSurface():
         
         self.camtoworld = camtoworld.detach().clone() if camtoworld is not None else None
         if camtoworld is not None:
-            self.cam_center = camtoworld[:3, 3]
+            self.cam_center = camtoworld[:3, 3].squeeze()
         elif cam_center is not None:
             self.cam_center = cam_center.detach().clone()
         else:
@@ -247,6 +247,29 @@ class WaterSurface():
             self.theta0 = torch.atan(self.s / self.H)
             self.theta1 = torch.atan((self.r - self.s) / (-self.z))
             self.d_theta = self.theta0 - self.theta1
+            
+    def calc_ray_length(self,
+    ):
+        """
+        Calculate the ray length from camera center to Gaussian center.
+        """
+        with torch.no_grad():
+            if not hasattr(self, 's'):
+                self.calc_intersection()
+            if not hasattr(self, 'theta0'):
+                self.calc_theta()
+                
+            # ray length cam to intersection point
+            self.ray_length_cam_to_intersec = torch.sqrt(self.s**2 + self.H**2)
+            
+            # ray length cam to apparent position of Gaussian center
+            self.ray_Length_cam_to_app = torch.sqrt((self.r + self.offset_r)**2 + \
+                                                  (self.H - self.za)**2)
+            
+            # ray length intersection point to real Gaussian center
+            self.ray_length_intersec_to_gaussian = torch.sqrt(self.za**2 + \
+                                                        (self.r - self.s)**2)
+
 
     ### ------------------------------
     ###        Calcurate apparent position of Gaussian centers
@@ -585,14 +608,14 @@ class WaterSurface():
             
             if method_transform_scales == "volume":
                 self.volume_correction_factor = self.calc_spatial_compression_by_volume()
+                self.scale_correction_factor = torch.pow(self.volume_correction_factor, coeff_transform_scales)  # (N,)
             elif method_transform_scales == "edges":
                 self.volume_correction_factor = self.calc_spatial_compression_by_edges()
+                self.scale_correction_factor = torch.pow(self.volume_correction_factor, coeff_transform_scales)  # (N,)
             elif method_transform_scales == "ray_length":
-                raise NotImplementedError("Method 'ray_length' is not implemented yet.")
+                self.scale_correction_factor = self.calc_spatial_compression_by_ray_length()
             else:
                 raise ValueError(f"Unknown method for calculating apparent scales: {method_transform_scales}")  
-            
-            self.scale_correction_factor = torch.pow(self.volume_correction_factor, coeff_transform_scales)  # (N,)
             
             if scale_correct_space == "real":
                 new_scales = self.scale_correction_factor.unsqueeze(-1) * self.scales  
@@ -650,7 +673,14 @@ class WaterSurface():
         """
         変化率 Ray Lenght between camera center and apparent position of Gaussian center
         """
-        raise NotImplementedError("Method 'calc_spatial_compression_by_ray_length' is not implemented yet.")
+        with torch.no_grad():
+            if not hasattr(self, 'ray_length_cam_to_app'):
+                self.calc_ray_length()
+            
+            # Calculate the ratio of the ray length from camera center to apparent position of Gaussian center
+            scale_correction_factor = self.ray_Length_cam_to_app / (self.ray_length_cam_to_intersec + self.ray_length_intersec_to_gaussian)
+            
+            return scale_correction_factor
         
     def calc_dSa_dS(self,
     ):

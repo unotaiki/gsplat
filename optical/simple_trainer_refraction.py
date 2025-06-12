@@ -103,7 +103,7 @@ class Config:
     max_steps: int = 15_000
     # Steps to evaluate the model
     # eval_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, 22_000, Config.max_steps])
-    eval_steps: List[int] = field(default_factory=lambda: [7_000, Config.max_steps])
+    eval_steps: List[int] = field(default_factory=lambda: [1_000, 7_000, Config.max_steps])
     # eval_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
@@ -528,7 +528,6 @@ class Runner:
         masks: Optional[Tensor] = None,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
-        
         
         # 全要素に対して変換を適用
         t_means, t_quats, t_scales = TransformWaterSurface.apply(
