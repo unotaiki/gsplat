@@ -70,8 +70,11 @@ class Config:
     # Path to the Mip-NeRF 360 dataset
     # refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_with-refraction"))
     # non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_wo-refraction"))
-    refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river2", "refraction"))
-    non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river2", "wo_refraction"))# Downsample factor for the dataset
+    # refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river2", "refraction"))
+    # non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river2", "wo_refraction"))# Downsample factor for the dataset
+    refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river4", "refraction"))
+    non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river4", "gt"))# Downsample factor for the dataset
+
 
     data_factor: int = 4
     # Directory to save results
@@ -97,9 +100,10 @@ class Config:
     steps_scaler: float = 1.0
 
     # Number of training steps   
-    max_steps: int = 30_000
+    max_steps: int = 15_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, 22_000, Config.max_steps])
+    # eval_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, 22_000, Config.max_steps])
+    eval_steps: List[int] = field(default_factory=lambda: [7_000, Config.max_steps])
     # eval_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
@@ -144,12 +148,12 @@ class Config:
     antialiased: bool = True
 
     # Use random background for training to discourage transparency
-    random_bkgd: bool = True
-
+    random_bkgd: bool = False
+    
     # Opacity regularization (default:0.0, mcmc:0.01)
     opacity_reg: float = 0.01
     # Scale regularization (default:0.0, mcmc:0.01)
-    scale_reg: float = 0.05
+    scale_reg: float = 0.01
 
     # Enable camera optimization.
     pose_opt: bool = False
@@ -212,11 +216,12 @@ class Config:
     coeff_transform_scales: float = 1/3     # "1/2" or "1/3" or any float value
     scale_correct_space: str = "log"  # "real" or "log" 
     
-    large_scale_reg_threshold: float = 3.0 # if 0.0, no large scale gaussians regularization
+    large_scale_reg_threshold: float = 0.0  # 3.0 # if 0.0, no large scale gaussians regularization
     large_scale_reg_sharpness: float = 2.0 # sharpness of tanh 
     large_scale_reg: float = 0.01  # regularization weight for large scale Gaussians
     
-    z_positive_reg: float = 0.1  # regularization weight for Gaussians with positive z coordinate (floater)
+    z_positive_reg: float = 0.0  # 0.1 regularization weight for Gaussians with positive z coordinate (floater)
+    z_plane_reg: float = -3.0  # regularization weight for Gaussians with z coordinate above this value (floater)
     
     # Strategy
     # ADC
@@ -558,7 +563,7 @@ class Runner:
         if cfg.sh_degree == 0:
             colors = self.splats["sh0"].squeeze()  # [N, 1, 3]
         else:
-            colors = torch.cat([self.splats["sh0"], self.splats["shN"]], dim=1)  # [N, K, 3]
+            colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         render_colors, render_alphas, info = rasterization(
@@ -739,7 +744,7 @@ class Runner:
             # regularization for Gaussians with positive z coordinate (floater)
             if cfg.z_positive_reg > 0.0:
                 z_coords = self.splats["means"][:, 2]
-                positive_z_value = F.relu(z_coords)  # [N,]
+                positive_z_value = F.relu(z_coords - cfg.z_positive_reg)  # [N,]
                 loss = (
                     loss
                     + cfg.z_positive_reg * torch.mean(positive_z_value**2)  # [N,]
