@@ -68,14 +68,14 @@ class Config:
     render_traj_path: str = "ellipse"
 
     # Path to the Mip-NeRF 360 dataset
-    refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river4", "refraction"))
-    non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river4", "gt"))# Downsample factor for the dataset
+    refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "bathymetry", "refraction"))
+    gt_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "bathymetry", "gt"))# Downsample factor for the dataset
 
 
     data_factor: int = 4
     # Directory to save results
     datetime = time.strftime("%Y-%m%d_%H-%M")
-    result_dir: str = f"results/0709/{datetime}_{os.path.basename(refraction_dir)}" 
+    result_dir: str = f"results/0710/{datetime}_{os.path.basename(refraction_dir)}" 
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -206,7 +206,7 @@ class Config:
     both_sides: bool = True
     
     flag_transform_quats: bool = True  # Whether to transform quaternions during refraction rasterization
-    flag_transform_scales: bool = False  # Whether to transform scales during refraction rasterization
+    flag_transform_scales: bool = True  # Whether to transform scales during refraction rasterization
     method_transform_quats: str = "dPa_dP"  # "dPa_dP" or "ray_angle"
     method_transform_scales: str = "edges" # "volume" or "edges" or "ray_length"
     coeff_transform_scales: float = 1/3     # "1/2" or "1/3" or any float value
@@ -378,30 +378,42 @@ class Runner:
         # Tensorboard
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
 
-        # Load data: Training data should contain initial points and colors.
+        # Load data: Training data should contain initial points and colors.        
+        self.parser_gt_train = Parser(
+            data_dir=cfg.gt_dir, split='train'
+        )
+        self.trainset_gt = Dataset(
+            self.parser_gt_train, patch_size=cfg.patch_size, load_depths=cfg.depth_loss,
+        )
+        self.parser_gt_val = Parser(
+            data_dir=cfg.gt_dir, split='val'
+        )
+        self.valset_gt = Dataset(
+            self.parser_gt_val, patch_size=cfg.patch_size, load_depths=cfg.depth_loss,
+        )
+
+        self.parser_ref_train = Parser(
+            data_dir=cfg.refraction_dir, split='train'
+        )
+        self.trainset_ref = Dataset(
+            self.parser_ref_train, patch_size=cfg.patch_size, load_depths=cfg.depth_loss,
+        )
+        self.parser_ref_val = Parser(
+            data_dir=cfg.refraction_dir, split='val'
+        )
+        self.valset_ref = Dataset(
+            self.parser_ref_val, patch_size=cfg.patch_size, load_depths=cfg.depth_loss,
+        )
         
-        # Training Data Set, Refracted Images
-        self.parser = Parser(
-            data_dir=cfg.refraction_dir if cfg.flag_refraction else cfg.non_refraction_dir,
-        )
-        self.trainset = Dataset(
-            self.parser,
-            split="train",
-            patch_size=cfg.patch_size,
-            load_depths=cfg.depth_loss,
-        )
-        # Validation Data Set, Non-refracted Images
-        self.parser_val = Parser(
-            data_dir=cfg.non_refraction_dir if cfg.flag_refraction else cfg.refraction_dir,
-        )
-        self.valset = Dataset(self.parser_val, split="train")  # TODO : Do i need validation set?
-        self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
+
+        
+        self.scene_scale = self.parser_gt_train.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
 
         # Model
         feature_dim = 32 if cfg.app_opt else None 
         self.splats, self.optimizers = create_splats_with_optimizers(
-            self.parser,
+            self.parser_gt_train,
             init_type=cfg.init_type,
             init_num_pts=cfg.init_num_pts,
             init_extent=cfg.init_extent,
@@ -625,7 +637,7 @@ class Runner:
 
         print("Loading Dataset by torch.utils.data.DataLoader")
         trainloader = torch.utils.data.DataLoader(
-            self.trainset,
+            self.trainset_ref if cfg.flag_refraction else self.trainset_gt,
             batch_size=cfg.batch_size,
             shuffle=True,
             num_workers=4,
@@ -926,28 +938,30 @@ class Runner:
             exist_ok=True,
         )
         cfg = self.cfg
-        sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
         device = self.device
         world_rank = self.world_rank
         world_size = self.world_size
-        valloader = torch.utils.data.DataLoader(
-            self.valset, batch_size=1, shuffle=False, num_workers=1
+        val_loader_gt = torch.utils.data.DataLoader(
+            self.valset_gt,
+            batch_size=1, shuffle=False, num_workers=1
         )
-        trainloader = torch.utils.data.DataLoader(
-            self.trainset, batch_size=1, shuffle=False, num_workers=1
+        val_loader_refraction = torch.utils.data.DataLoader(
+            self.valset_ref,
+            batch_size=1, shuffle=False, num_workers=1
         )
+            
         ellipse_time = 0
         metrics = defaultdict(list)
         
-        for i, data in enumerate(valloader):            
+        for i, data in enumerate(val_loader_gt):            
             camtoworlds = data["camtoworld"].to(device)
             Ks = data["K"].to(device)
             
-            pixels_val = data["image"].to(device) / 255.0
-            pixels_train = trainloader.dataset[i]["image"].to(device).unsqueeze(0) / 255.0
+            pixels_gt = data["image"].to(device) / 255.0
+            pixels_ref = val_loader_refraction.dataset[i]["image"].to(device).unsqueeze(0) / 255.0
             
             masks = data["mask"].to(device) if "mask" in data else None
-            height, width = pixels_val.shape[1:3]
+            height, width = pixels_gt.shape[1:3]
 
             torch.cuda.synchronize()
             tic = time.time()
@@ -979,20 +993,12 @@ class Runner:
             refractive_colors = torch.clamp(refractive_colors, 0.0, 1.0)
             non_refractive_colors = torch.clamp(non_refractive_colors, 0.0, 1.0)
             
-            if cfg.flag_refraction:
-                row_ref = torch.cat(
-                    [pixels_train, refractive_colors], dim=2
-                )
-                row_non_ref = torch.cat(
-                    [pixels_val, non_refractive_colors], dim=2
-                )
-            else:
-                row_ref = torch.cat(
-                    [pixels_val, refractive_colors], dim=2
-                )
-                row_non_ref = torch.cat(
-                    [pixels_train, non_refractive_colors], dim=2
-                )
+            row_ref = torch.cat(
+                [pixels_ref, refractive_colors], dim=2
+            )
+            row_non_ref = torch.cat(
+                [pixels_gt, non_refractive_colors], dim=2
+            )
             canvas_list = torch.cat(
                 [row_ref, row_non_ref], dim=1)
 
@@ -1006,9 +1012,9 @@ class Runner:
                     canvas,
                 )
 
-                GT_w_ref = pixels_train.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                GT_w_ref = pixels_ref.permute(0, 3, 1, 2)  # [1, 3, H, W]
                 render_w_ref = refractive_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
-                GT_wo_ref = pixels_val.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                GT_wo_ref = pixels_gt.permute(0, 3, 1, 2)  # [1, 3, H, W]
                 render_wo_ref = non_refractive_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
                 metrics["psnr-w/-ref"].append(self.psnr(render_w_ref, GT_w_ref))
                 metrics["ssim-w/-ref"].append(self.ssim(render_w_ref, GT_w_ref))
@@ -1017,12 +1023,12 @@ class Runner:
                 metrics["ssim-w/o-ref"].append(self.ssim(render_wo_ref, GT_wo_ref))
                 metrics["lpips-w/o-ref"].append(self.lpips(render_wo_ref, GT_wo_ref))                
                 if cfg.use_bilateral_grid:
-                    cc_colors = color_correct(refractive_colors, pixels_val)
+                    cc_colors = color_correct(refractive_colors, pixels_gt)
                     cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
                     metrics["cc_psnr"].append(self.psnr(cc_colors_p, GT_w_ref))
 
         if world_rank == 0:
-            ellipse_time /= len(valloader)
+            ellipse_time /= len(val_loader_gt)
 
             stats = {k: torch.stack(v).mean().item() for k, v in metrics.items()}
             stats.update(
@@ -1054,7 +1060,7 @@ class Runner:
         cfg = self.cfg
         device = self.device
 
-        camtoworlds_all = self.parser.camtoworlds[5:-5]
+        camtoworlds_all = self.parser_gt_val.camtoworlds[5:-5]
         if cfg.render_traj_path == "interp":
             camtoworlds_all = generate_interpolated_path(
                 camtoworlds_all, 1
@@ -1065,10 +1071,11 @@ class Runner:
                 camtoworlds_all, height=height
             )  # [N, 3, 4]
         elif cfg.render_traj_path == "spiral":
+            assert NotImplementedError("i havent implemented bounds and extconf of parser yet")
             camtoworlds_all = generate_spiral_path(
                 camtoworlds_all,
-                bounds=self.parser.bounds * self.scene_scale,
-                spiral_scale_r=self.parser.extconf["spiral_radius_scale"],
+                bounds=self.parser_gt_train.bounds * self.scene_scale,
+                spiral_scale_r=self.parser_gt_train.extconf["spiral_radius_scale"],
             )
         else:
             raise ValueError(
@@ -1086,8 +1093,8 @@ class Runner:
         )  # [N, 4, 4]
 
         camtoworlds_all = torch.from_numpy(camtoworlds_all).float().to(device)
-        K = torch.from_numpy(list(self.parser.Ks_dict.values())[0]).float().to(device)
-        width, height = list(self.parser.imsize_dict.values())[0]
+        K = torch.from_numpy(list(self.parser_gt_val.Ks_dict.values())[0]).float().to(device)
+        width, height = list(self.parser_gt_val.imsize_dict.values())[0]
 
         # save to video
         video_dir = f"{cfg.result_dir}/videos"

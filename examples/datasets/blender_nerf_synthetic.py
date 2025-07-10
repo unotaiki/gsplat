@@ -39,11 +39,14 @@ class Parser:
       - self.point_indices: Dict[str, np.ndarray] 画像ごとに参照する点群のインデックス（今回は全点 or 空）
       - self.transform    : np.ndarray  (4, 4) 変換行列。Blenderでは単位行列 (np.eye(4))
     """
-    def __init__(self, data_dir: str):
+    def __init__(self, 
+                 data_dir: str,
+                 split: str = "train", # or "val"
+                 ):
         self.data_dir = os.path.abspath(data_dir)
-        transforms_path = os.path.join(data_dir, "transforms_train.json")
+        transforms_path = os.path.join(self.data_dir, f"transforms_{split}.json")
         if not os.path.exists(transforms_path):
-            raise ValueError(f"transforms_train.json not found in {data_dir}")
+            raise ValueError(f"transforms_{split}.json not found in {data_dir}")
         
         with open(transforms_path, "r") as f:
             transforms = json.load(f)
@@ -60,7 +63,6 @@ class Parser:
         # --- 各フレームから画像ファイルパスとカメラ姿勢の取得 ---
         self.image_names = []  # JSON内の file_path（拡張子付与後）
         self.image_paths = []  # 絶対パス
-        # world2cam_list = []     # ワールド座標系 → カメラ座標系への変換 (レンダリング・射影に使う)
         cam2world_list = []  # カメラ座標系 → ワールド座標系への変換 (カメラ位置や向きを表す)
         self.camera_ids = []   # すべて 0 を格納
         
@@ -70,20 +72,17 @@ class Parser:
             if not os.path.splitext(file_path)[1]:
                 file_path = file_path + ".png"
             self.image_names.append(file_path)
-            full_path = os.path.join(data_dir, file_path)
+            full_path = os.path.join(self.data_dir, file_path)
             self.image_paths.append(full_path)
             
             # transform_matrix を numpy array 化
             transform_matrix = np.array(frame.get("transform_matrix"), dtype=np.float32)
             cam2world_list.append(transform_matrix)
-            # world2cam_list.append(transform_matrix)
             self.camera_ids.append(0)
         
         self.camtoworlds = np.array(cam2world_list,dtype=np.float32)
         # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
         self.camtoworlds[:, :3, 1:3] *= -1
-        # self.camtoworlds = np.stack(camtoworld_list, axis=0)  # (N, 4, 4)
-        world2cams = np.linalg.inv(self.camtoworlds)
         
         # --- 内部パラメータ K の計算 ---
         # 画像サイズは、最初の画像から取得
@@ -149,11 +148,9 @@ class Dataset:
       - load_depths: 3D 点群から Depth 情報を生成（points3d.ply が存在する場合）
     """
     def __init__(self, parser: Parser, 
-                 split: str = "train", 
                  patch_size: int = None, 
                  load_depths: bool = False):
         self.parser = parser
-        self.split = split  # Blender では "train" のみ対応
         self.patch_size = patch_size
         self.load_depths = load_depths
         # train/test 分割は不要なので、全画像を対象とする
@@ -229,7 +226,7 @@ if __name__ == "__main__":
                             help="Blender NeRF Synthetic データセットのルートディレクトリ")
     parser_arg.add_argument("--patch_size", type=int, default=None,
                             help="ランダムクロップするパッチサイズ（指定しない場合はフル画像）")
-    parser_arg.add_argument("--load_depths", action="store_true",
+    parser_arg.add_argument("--load_depths", action="store_true", default=None,
                             help="3D点群から Depth 情報を生成する場合のフラグ")
     args = parser_arg.parse_args()
     
