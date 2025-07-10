@@ -84,7 +84,6 @@ class LoadDataset:
     def get_camera_param(self):
         return self.pixels_wo, self.pixels_w, self.camtoworld, self.worldtocam, self.cam_center, self.K, self.height, self.width, self.image_id
     
-    
 
 def combert_into_colormap(x, colormap="viridis", device=device):
     """

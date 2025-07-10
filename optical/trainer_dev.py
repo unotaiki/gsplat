@@ -68,10 +68,6 @@ class Config:
     render_traj_path: str = "ellipse"
 
     # Path to the Mip-NeRF 360 dataset
-    # refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_with-refraction"))
-    # non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river1", "river_wo-refraction"))
-    # refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river2", "refraction"))
-    # non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river2", "wo_refraction"))# Downsample factor for the dataset
     refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river4", "refraction"))
     non_refraction_dir = os.path.abspath(os.path.join(os.path.expanduser("~"), "dataset", "river4", "gt"))# Downsample factor for the dataset
 
@@ -79,7 +75,7 @@ class Config:
     data_factor: int = 4
     # Directory to save results
     datetime = time.strftime("%Y-%m%d_%H-%M")
-    result_dir: str = f"results/0707/{datetime}_{os.path.basename(refraction_dir)}" 
+    result_dir: str = f"results/0709/{datetime}_{os.path.basename(refraction_dir)}" 
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -103,7 +99,7 @@ class Config:
     max_steps: int = 15_000
     # Steps to evaluate the model
     # eval_steps: List[int] = field(default_factory=lambda: [7_000, 15_000, 22_000, Config.max_steps])
-    eval_steps: List[int] = field(default_factory=lambda: [7_000, Config.max_steps])
+    eval_steps: List[int] = field(default_factory=lambda: [2_000, Config.max_steps])
     # eval_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
     # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [Config.max_steps])
@@ -197,7 +193,7 @@ class Config:
     num_init_points: int = 1e4
     
     # Refraction
-    flag_refraction: bool = True                                    
+    flag_refraction: bool = True                             
     n: float = 1.33 # refractive index
     plane: float = 0.0 # refractive plane (to z axis)
     atol: float = 1e-8 # tolerance for refraction calculation
@@ -210,7 +206,7 @@ class Config:
     both_sides: bool = True
     
     flag_transform_quats: bool = True  # Whether to transform quaternions during refraction rasterization
-    flag_transform_scales: bool = True  # Whether to transform scales during refraction rasterization
+    flag_transform_scales: bool = False  # Whether to transform scales during refraction rasterization
     method_transform_quats: str = "dPa_dP"  # "dPa_dP" or "ray_angle"
     method_transform_scales: str = "edges" # "volume" or "edges" or "ray_length"
     coeff_transform_scales: float = 1/3     # "1/2" or "1/3" or any float value
@@ -516,8 +512,7 @@ class Runner:
         if masks is not None:
             render_colors[~masks] = 0
         return render_colors, render_alphas, info
-    
-
+        
 
     def rasterize_splats_with_refraction(
         self,
@@ -559,10 +554,14 @@ class Runner:
         
         opacities = torch.sigmoid(self.splats["opacities"])  # [N]
         
-        if self.cfg.sh_degree == 0:
-            colors = self.splats["sh0"].squeeze()  # [N, 1, 3]
-        else:
-            colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
+        # if self.cfg.sh_degree == 0:
+        #     # colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
+        #     colors = self.splats["sh0"].squeeze()  # [N, 1, 3]  # work but color had changed
+        #     colors = torch.sigmoid(colors)
+        # else:
+        #     colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
+            
+        colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         render_colors, render_alphas, info = rasterization(
@@ -684,6 +683,9 @@ class Runner:
                     Ks=Ks,
                     width=width,
                     height=height,
+                    sh_degree=sh_degree_to_use,
+                    near_plane=cfg.near_plane,
+                    far_plane=cfg.far_plane,
                     render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                     masks=masks,
                 )
@@ -924,6 +926,7 @@ class Runner:
             exist_ok=True,
         )
         cfg = self.cfg
+        sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
         device = self.device
         world_rank = self.world_rank
         world_size = self.world_size
@@ -955,7 +958,9 @@ class Runner:
                 Ks=Ks,
                 width=width,
                 height=height,
-                # sh_degree=cfg.sh_degree, # this causes error about color          
+                sh_degree=cfg.sh_degree,
+                near_plane=cfg.near_plane,
+                far_plane=cfg.far_plane,
                 masks=masks,
             )  # [1, H, W, 3]
             non_refractive_colors, _, _ = self.rasterize_splats(
@@ -1097,7 +1102,7 @@ class Runner:
                 Ks=Ks,
                 width=width,
                 height=height,
-                sh_degree=cfg.sh_degree, # Error occurs
+                sh_degree=cfg.sh_degree, 
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 render_mode="RGB+ED",
@@ -1107,7 +1112,7 @@ class Runner:
                 Ks=Ks,
                 width=width,
                 height=height,
-                # sh_degree=cfg.sh_degree,  # Error occurs
+                sh_degree=cfg.sh_degree,  
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 render_mode="RGB+ED",                
