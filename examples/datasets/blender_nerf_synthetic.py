@@ -46,7 +46,7 @@ class Parser:
         self.data_dir = os.path.abspath(data_dir)
         transforms_path = os.path.join(self.data_dir, f"transforms_{split}.json")
         if not os.path.exists(transforms_path):
-            raise ValueError(f"transforms_{split}.json not found in {data_dir}")
+            raise ValueError(f"transforms_{split}.json not found in {self.data_dir}")
         
         with open(transforms_path, "r") as f:
             transforms = json.load(f)
@@ -183,7 +183,7 @@ class Dataset:
             "image": torch.from_numpy(image).float(),
             "K": torch.from_numpy(K).float(),
             "camtoworld": torch.from_numpy(camtoworld).float(),
-            "image_id": int(item)
+            "image_id": int(index)
         }
         
         # --- オプション: Depth 情報の生成 ---

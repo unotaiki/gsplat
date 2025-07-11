@@ -29,7 +29,7 @@ class TransformWaterSurface(torch.autograd.Function):
                 method_transform_quats: str = "dPa_dP", # "dPa_dP" or "ray_angle"
                 method_transform_scales: str = "edges", # "volume" or "edges" or "ray_length"
                 coeff_transform_scales: float = 1/3, # "1/2" or "1/3"
-                scale_correct_space: str = "log",   # "real" or "log"
+                scale_correct_space: str = "log",   # "real" or "log" 
     ):
         
         device = means.device

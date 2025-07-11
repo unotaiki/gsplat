@@ -192,7 +192,7 @@ class Config:
     num_init_points: int = 1e4
     
     # Refraction
-    flag_refraction: bool = True               
+    flag_refraction: bool = False                   
     n: float = 1.33 # refractive index
     plane: float = 0.0 # refractive plane (to z axis)
     atol: float = 1e-8 # tolerance for refraction calculation
@@ -205,9 +205,9 @@ class Config:
     both_sides: bool = True
     
     flag_transform_quats: bool = True  # Whether to transform quaternions during refraction rasterization
-    flag_transform_scales: bool = True  # Whether to transform scales during refraction rasterization
+    flag_transform_scales: bool = False  # Whether to transform scales during refraction rasterization
     method_transform_quats: str = "dPa_dP"  # "dPa_dP" or "ray_angle"
-    method_transform_scales: str = "volume" # "volume" or "edges" or "ray_length"
+    method_transform_scales: str = "edges" # "volume" or "edges" or "ray_length"
     coeff_transform_scales: float = 1/3     # "1/2" or "1/3" or any float value
     scale_correct_space: str = "log"  # "real" or "log" 
     
@@ -636,7 +636,7 @@ class Runner:
 
         print("Loading Dataset by torch.utils.data.DataLoader")
         trainloader = torch.utils.data.DataLoader(
-            self.trainset_ref if cfg.flag_refraction else self.trainset_gt,
+            self.trainset_ref,
             batch_size=cfg.batch_size,
             shuffle=False,
             num_workers=4,
@@ -688,31 +688,18 @@ class Runner:
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
 
             # forward (レンダリング)
-            if cfg.flag_refraction:
-                renders, alphas, info = self.rasterize_splats_with_refraction(
-                    camtoworlds=camtoworlds,
-                    Ks=Ks,
-                    width=width,
-                    height=height,
-                    sh_degree=sh_degree_to_use,
-                    near_plane=cfg.near_plane,
-                    far_plane=cfg.far_plane,
-                    render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-                    masks=masks,
-                )
-            else:
-                renders, alphas, info = self.rasterize_splats(
-                    camtoworlds=camtoworlds,
-                    Ks=Ks,
-                    width=width,
-                    height=height,
-                    sh_degree=sh_degree_to_use,
-                    near_plane=cfg.near_plane,
-                    far_plane=cfg.far_plane,
-                    image_ids=image_ids,
-                    render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-                    masks=masks,
-                )                
+            renders, alphas, info = self.rasterize_splats(
+                camtoworlds=camtoworlds,
+                Ks=Ks,
+                width=width,
+                height=height,
+                sh_degree=sh_degree_to_use,
+                near_plane=cfg.near_plane,
+                far_plane=cfg.far_plane,
+                image_ids=image_ids,
+                render_mode="RGB+ED" if cfg.depth_loss else "RGB",
+                masks=masks,
+            )                
             # 深度がある場合は4ch(RGB+Depth)になるため、RGBとDで分離
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
@@ -812,7 +799,7 @@ class Runner:
                     f"{self.stats_dir}/train_step{step:04d}_rank{self.world_rank}.json",
                     "w",
                 ) as f:
-                    json.dump(stats, f, indent=4)
+                    json.dump(stats, f)
                 data = {"step": step, "splats": self.splats.state_dict()}
                 # if cfg.pose_opt:
                 #     if world_size > 1:
@@ -1044,7 +1031,7 @@ class Runner:
             )
             # save stats as json
             with open(f"{self.stats_dir}/{stage}_step{step:04d}.json", "w") as f:
-                json.dump(stats, f, indent=4)
+                json.dump(stats, f)
             # save stats to tensorboard
             for k, v in stats.items():
                 self.writer.add_scalar(f"{stage}/{k}", v, step)
